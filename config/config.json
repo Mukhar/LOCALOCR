@@ -1,0 +1,17 @@
+{
+  "video_path": "./input_videos/test_video.mp4",
+  "frame_interval_seconds": 1,
+  "languages": [
+    "en"
+  ],
+  "match_keywords": [
+    "dashboard",
+    "payment",
+    "success",
+    "login",
+    "settings"
+  ],
+  "match_mode": "contains",
+  "output_directory": "./output",
+  "log_directory": "./logs"
+}
