@@ -8,6 +8,7 @@ EasyOCR models are downloaded on first use (~100MB) and cached in ~/.EasyOCR/.
 """
 
 import logging
+import threading
 from pathlib import Path
 
 from .base_engine import OCREngine
@@ -16,6 +17,11 @@ logger = logging.getLogger(__name__)
 
 # Lazy-loaded EasyOCR reader instances (cached per language combo)
 _readers = {}
+
+# EasyOCR's underlying PyTorch model is not thread-safe for concurrent readtext()
+# calls on the same reader instance. This lock serialises all readtext() calls
+# globally, making it safe to use EasyOCREngine from multiple threads.
+_readtext_lock = threading.Lock()
 
 
 class EasyOCREngine(OCREngine):
@@ -73,7 +79,8 @@ class EasyOCREngine(OCREngine):
         reader = self._get_reader(languages)
 
         try:
-            results = reader.readtext(str(path), detail=1, paragraph=False)
+            with _readtext_lock:
+                results = reader.readtext(str(path), detail=1, paragraph=False)
         except Exception as exc:
             from .ocr_engine import OCRError
             raise OCRError(f"EasyOCR failed for {str(path)!r}: {exc}") from exc

@@ -20,6 +20,7 @@ class AppleVisionEngine(OCREngine):
         self,
         recognition_level: str = "accurate",
         use_language_correction: bool = True,
+        workers: int = 1,
     ):
         """
         Parameters
@@ -30,13 +31,38 @@ class AppleVisionEngine(OCREngine):
         use_language_correction : bool
             Apply linguistic post-processing. Adds ~50-80ms per frame.
             Set False for speed when text is unambiguous (tickers, lower-thirds).
+        workers : int
+            Number of frames that can be processed concurrently. Apple Vision
+            submits to the Apple Neural Engine (ANE) which serializes requests
+            internally — benchmarks show no throughput gain beyond 2 workers.
+            Worker 2 overlaps CPU image-decode of the next frame with ANE
+            inference on the current one. Default 2.
+            Controlled by ``apple_vision_workers`` in ocr_config.
         """
         self._recognition_level = recognition_level
         self._use_language_correction = use_language_correction
+        self._workers = workers
 
     @property
     def name(self) -> str:
         return "apple_vision"
+
+    @property
+    def max_parallel_frames(self) -> int:
+        """Returns configured worker count; used as process-pool size."""
+        return self._workers
+
+    @property
+    def supports_multiprocessing(self) -> bool:
+        """Apple Vision can run in separate worker processes for true ANE parallelism."""
+        return True
+
+    def worker_init_args(self) -> dict:
+        """Config needed to reconstruct this engine in a worker process."""
+        return {
+            "recognition_level": self._recognition_level,
+            "use_language_correction": self._use_language_correction,
+        }
 
     def supported_languages(self) -> list:
         """Query Vision Framework for supported languages."""

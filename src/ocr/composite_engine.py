@@ -15,6 +15,7 @@ higher accuracy — EasyOCR contributes only what Apple Vision cannot read.
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .base_engine import OCREngine
 
@@ -96,7 +97,8 @@ class CompositeEngine(OCREngine):
 
     def recognize(self, image_path: str, languages: list = None) -> str:
         """
-        Run each sub-engine with its assigned languages and merge results.
+        Run each sub-engine in parallel (different hardware: CPU/ANE vs MPS GPU),
+        then merge results using script-aware deduplication.
 
         The primary engine (index 0, Apple Vision) contributes all its lines.
         Secondary engines (index 1+, EasyOCR) only contribute lines that are
@@ -104,18 +106,36 @@ class CompositeEngine(OCREngine):
         words that the primary engine already found more accurately.
         Exact-string duplicates are also removed across all engines.
         """
+        # Run all engines concurrently — they use different hardware
+        # (Apple Vision → CPU/ANE, EasyOCR → MPS GPU), so no resource contention.
+        engine_results = {}  # {engine_idx: text_or_None}
+
+        def _call_engine(idx_engine_langs):
+            idx, engine, engine_langs = idx_engine_langs
+            try:
+                return idx, engine.recognize(image_path, languages=engine_langs), None
+            except Exception as exc:
+                return idx, "", exc
+
+        with ThreadPoolExecutor(max_workers=len(self._engines)) as pool:
+            futures = {
+                pool.submit(_call_engine, (idx, eng, langs)): idx
+                for idx, (eng, langs) in enumerate(self._engines)
+            }
+            for future in as_completed(futures):
+                idx, text, exc = future.result()
+                if exc:
+                    engine_name = self._engines[idx][0].name
+                    logger.warning("Engine %s failed on %s: %s", engine_name, image_path, exc)
+                engine_results[idx] = text
+
+        # Merge in engine order (primary first) with script-aware dedup
         all_lines = []
         seen_lines = set()
 
-        for engine_idx, (engine, engine_langs) in enumerate(self._engines):
+        for engine_idx, (engine, _) in enumerate(self._engines):
             is_primary = engine_idx == 0
-            try:
-                text = engine.recognize(image_path, languages=engine_langs)
-            except Exception as exc:
-                logger.warning(
-                    "Engine %s failed on %s: %s", engine.name, image_path, exc
-                )
-                continue
+            text = engine_results.get(engine_idx, "")
 
             added = skipped_dup = skipped_latin = 0
             for line in text.splitlines():

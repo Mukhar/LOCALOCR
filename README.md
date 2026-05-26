@@ -1,18 +1,21 @@
 # LOCALOCR — Local Video Screen OCR Pipeline for macOS
 
-A fully local, offline macOS pipeline that extracts frames from MP4 videos, runs OCR using Apple's native Vision Framework, detects keywords, and organizes matching screens into categorized folders.
+A fully local, offline macOS pipeline that extracts frames from videos, runs OCR using Apple Vision Framework and/or EasyOCR, detects keywords, and organizes matching screens into categorized folders.
 
 ---
 
 ## Features
 
 - **100% Local Processing** — no data leaves your machine
-- **Apple Vision Framework OCR** — native macOS text recognition, fast and accurate
+- **Multi-Engine OCR** — Apple Vision (English, CPU/ANE) + EasyOCR (Hindi/Indic, MPS GPU), auto-selected by language
+- **Parallel Processing** — 4 concurrent threads for English-only; Apple Vision and EasyOCR run simultaneously per frame in composite mode
+- **Hindi + English Support** — composite engine merges both engines with script-aware deduplication (Devanagari from EasyOCR, Latin from Apple Vision)
+- **OCR-Only Mode** — skip video extraction and re-run OCR on already-extracted frames
 - **Configurable Frame Intervals** — extract frames every 1, 2, 3, or N seconds
-- **Keyword Matching** — case-insensitive contains, exact, or regex matching
+- **Keyword Matching** — contains, exact, or regex matching; supports Unicode (Hindi keywords)
 - **Auto-Organization** — matched frames sorted into keyword-named folders
-- **Metadata Export** — full OCR results stored as JSON for future use
-- **Structured Logging** — console + file logging with configurable levels
+- **Metadata Export** — full OCR results stored as JSON
+- **Structured Logging** — console (INFO) + file (DEBUG) logging
 
 ---
 
@@ -21,7 +24,6 @@ A fully local, offline macOS pipeline that extracts frames from MP4 videos, runs
 - **macOS** (required for Apple Vision Framework)
 - **Python 3.9+**
 - **FFmpeg** (for video frame extraction)
-- **Homebrew** (for installing ffmpeg)
 
 ---
 
@@ -38,13 +40,8 @@ brew install ffmpeg
 ```bash
 cd LOCALOCR
 
-# Create virtual environment
 python3 -m venv .venv
-
-# Activate it
 source .venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 ```
 
@@ -52,22 +49,23 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Quick Start
-
-1. Place your `.mp4` video in `input_videos/`
-2. Edit `config/config.json` with your settings
-3. Run the pipeline:
+### Full Pipeline (extract frames + OCR)
 
 ```bash
 source .venv/bin/activate
-python main.py
+python main.py                          # uses ./config/config.json
+python main.py path/to/config.json      # custom config
 ```
 
-### Custom Config Path
+### OCR-Only Mode (skip extraction, re-run OCR on existing frames)
 
 ```bash
-python main.py path/to/your/config.json
+python main.py --ocr-only
+python main.py --ocr-only --frames-dir ./output/all_frames
+python main.py path/to/config.json --ocr-only --frames-dir /path/to/frames
 ```
+
+`--frames-dir` defaults to `<output_directory>/all_frames` from config if not specified.
 
 ---
 
@@ -78,35 +76,58 @@ Edit `config/config.json`:
 ```json
 {
   "video_path": "./input_videos/your_video.mp4",
-  "frame_interval_seconds": 2,
+  "frame_interval_seconds": 3,
   "languages": ["en"],
-  "match_keywords": [
-    "dashboard",
-    "payment",
-    "success",
-    "login"
-  ],
+  "ocr_engine": "auto",
+  "ocr_config": {
+    "recognition_level": "fast",
+    "use_language_correction": false,
+    "apple_vision_workers": 4,
+    "easyocr_gpu": true,
+    "easyocr_confidence_threshold": 0.3
+  },
+  "match_keywords": ["dashboard", "login"],
   "match_mode": "contains",
   "output_directory": "./output",
   "log_directory": "./logs"
 }
 ```
 
-### Configuration Options
+### Top-Level Options
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `video_path` | string | *required* | Path to the input .mp4 file |
+| `video_path` | string | *required* | Path to the input video file (mp4, webm, etc.) |
 | `frame_interval_seconds` | int | `2` | Seconds between frame captures |
-| `languages` | list | `["en"]` | OCR languages (Phase 1: English only) |
-| `match_keywords` | list | *required* | Keywords to search for in OCR text |
-| `match_mode` | string | `"contains"` | Matching mode: `contains`, `exact`, or `regex` |
+| `languages` | list | `["en"]` | OCR languages — see Engine Selection below |
+| `ocr_engine` | string | `"auto"` | `"auto"`, `"apple_vision"`, `"easyocr"`, or `"composite"` |
+| `ocr_config` | dict | `{}` | Engine-specific options — see below |
+| `match_keywords` | list | *required* | Keywords to search for (supports Unicode/Hindi) |
+| `match_mode` | string | `"contains"` | `"contains"`, `"exact"`, or `"regex"` |
 | `output_directory` | string | `"./output"` | Where results are saved |
 | `log_directory` | string | `"./logs"` | Where log files are written |
 
+### `ocr_config` Options
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `recognition_level` | string | `"accurate"` | `"fast"` (~27ms/frame) or `"accurate"` (~160ms/frame) — Apple Vision only |
+| `use_language_correction` | bool | `true` | Linguistic post-processing (+50ms). Set `false` for speed |
+| `apple_vision_workers` | int | `4` | Parallel frame threads for English-only mode (Apple Vision is thread-safe) |
+| `easyocr_gpu` | bool | `false` | Use MPS GPU for EasyOCR on Apple Silicon |
+| `easyocr_confidence_threshold` | float | `0.3` | Min confidence to accept an EasyOCR text line (0–1). Raise to 0.5+ for cleaner output |
+
+### Engine Selection (auto mode)
+
+| `languages` | Engine selected | Hardware |
+|---|---|---|
+| `["en"]` | Apple Vision | CPU + Apple Neural Engine |
+| `["hi"]` | EasyOCR | MPS GPU (Apple Silicon) |
+| `["en", "hi"]` | Composite | Both run in parallel per frame |
+
 ### Match Modes
 
-- **`contains`** — case-insensitive substring match (recommended for MVP)
+- **`contains`** — case-insensitive substring match (recommended)
 - **`exact`** — case-insensitive full-line match
 - **`regex`** — Python regex pattern matching
 
@@ -123,8 +144,6 @@ output/
 ├── matched/             # Frames matching keywords
 │   ├── dashboard/
 │   │   └── frame_0001_00m00s.png
-│   ├── payment/
-│   │   └── frame_0003_00m06s.png
 │   └── login/
 │       └── frame_0012_00m24s.png
 └── metadata/
@@ -132,8 +151,6 @@ output/
 ```
 
 ### Metadata Format
-
-Each entry in `ocr_results.json`:
 
 ```json
 {
@@ -151,35 +168,42 @@ Each entry in `ocr_results.json`:
 
 ```
 LOCALOCR/
-├── main.py                    # Entry point
+├── main.py                      # CLI entry point (argparse)
 ├── config/
-│   └── config.json            # Pipeline configuration
+│   └── config.json              # Pipeline configuration
 ├── src/
 │   ├── extractor/
-│   │   └── frame_extractor.py # FFmpeg-based frame extraction
+│   │   └── frame_extractor.py   # FFmpeg-based frame extraction
 │   ├── ocr/
-│   │   └── ocr_engine.py      # Apple Vision Framework OCR
+│   │   ├── base_engine.py       # Abstract OCR engine base class
+│   │   ├── engine_factory.py    # Auto-selects engine by language
+│   │   ├── ocr_engine.py        # Runs OCR with ThreadPoolExecutor
+│   │   ├── apple_vision_engine.py  # Apple Vision Framework (English)
+│   │   ├── easyocr_engine.py    # EasyOCR (Hindi/Indic, 80+ languages)
+│   │   └── composite_engine.py  # Parallel multi-engine merge
 │   ├── matcher/
-│   │   └── text_matcher.py    # Keyword matching engine
+│   │   └── text_matcher.py      # Keyword matching engine
 │   ├── organizer/
-│   │   └── file_organizer.py  # File organization logic
+│   │   └── file_organizer.py    # File organization logic
 │   └── pipeline/
-│       └── pipeline_runner.py # Pipeline orchestrator
-├── input_videos/              # Place input videos here
-├── output/                    # Pipeline output (auto-created)
-├── logs/                      # Log files (auto-created)
-├── requirements.txt           # Python dependencies
-├── .gitignore
-└── README.md
+│       └── pipeline_runner.py   # Full pipeline + OCR-only orchestrator
+├── input_videos/                # Place input videos here
+├── output/                      # Pipeline output (auto-created)
+├── logs/                        # Log files (auto-created)
+└── requirements.txt
 ```
 
 ---
 
 ## Performance
 
-- A 1-hour video with 2-second intervals (~1800 frames) processes in approximately 10–20 minutes
-- OCR uses Apple's optimized Vision Framework (no GPU required)
-- Frames are extracted using FFmpeg (highly optimized native binary)
+| Mode | Parallelism | Approx. speed |
+|---|---|---|
+| English-only (`fast` + no LC) | 4 frames concurrently (Apple Vision threads) | ~27ms/frame |
+| English-only (`accurate` + LC) | 4 frames concurrently | ~160ms/frame |
+| Hindi+English composite | Apple Vision + EasyOCR per frame simultaneously | ~300ms/frame (GPU) |
+
+A 1-hour video at 3-second intervals (~1200 frames) in English-only fast mode processes in roughly 2–3 minutes.
 
 ---
 
@@ -191,26 +215,22 @@ LOCALOCR/
 brew install ffmpeg
 ```
 
-### "pyobjc-framework-Vision not found"
+### "pyobjc-framework-Vision not found" or "easyocr not found"
 
 ```bash
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### OCR returns empty text
+### OCR returns empty or garbled text
 
-- Ensure the video contains readable text (not too small, decent contrast)
-- Apple Vision Framework works best with English text in Phase 1
-- Very small or stylized fonts may not be recognized
+- Use `recognition_level: "accurate"` for small or stylized fonts
+- Raise `easyocr_confidence_threshold` to `0.5` to discard low-confidence lines
+- Apple Vision works best with clear, high-contrast text
 
-### Pipeline fails on non-.mp4 files
+### EasyOCR models not downloading
 
-Only `.mp4` files are supported in Phase 1. Convert other formats first:
-
-```bash
-ffmpeg -i input.avi -c:v libx264 -c:a aac output.mp4
-```
+EasyOCR downloads models (~100MB) on first use to `~/.EasyOCR/`. Ensure internet access on first run; subsequent runs are fully offline.
 
 ---
 
@@ -219,16 +239,6 @@ ffmpeg -i input.avi -c:v libx264 -c:a aac output.mp4
 Logs are written to both:
 - **Console** — INFO level and above
 - **File** (`logs/localocr.log`) — DEBUG level and above
-
-Example log output:
-```
-[INFO] LOCALOCR Pipeline Started
-[INFO] Video: ./input_videos/demo.mp4
-[INFO] [Step 1/4] Extracted 120 frames
-[INFO] [Step 2/4] OCR complete
-[INFO] Matching complete: 15/120 frames matched
-[INFO] Processing time: 45.23 seconds
-```
 
 ---
 

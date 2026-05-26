@@ -2,14 +2,14 @@
   "video_path": "./input_videos/asset/low/25mayzeebiz.webm",
   "frame_interval_seconds": 3,
   "languages": [
-    "en",
-    "hi"
+    "en"
   ],
   "ocr_engine": "auto",
   "ocr_config": {
     "easyocr_gpu": true,
     "easyocr_confidence_threshold": 0.3,
-    "recognition_level": "fast",
+    "apple_vision_workers": 8,
+    "recognition_level": "accurate",
     "use_language_correction": false,
     "ocr_workers": 1
   },

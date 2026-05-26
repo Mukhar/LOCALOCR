@@ -51,6 +51,7 @@ def get_engine(config: dict = None) -> OCREngine:
         return AppleVisionEngine(
             recognition_level=ocr_config.get("recognition_level", "accurate"),
             use_language_correction=ocr_config.get("use_language_correction", True),
+            workers=ocr_config.get("apple_vision_workers", 2),
         )
 
     elif engine_name == "easyocr":
