@@ -4,6 +4,14 @@ composite_engine.py
 OCR engine that runs multiple engines in sequence and merges their results.
 Used when different scripts require different engines — e.g. Apple Vision for
 English and EasyOCR for Hindi — to get the best accuracy for each language.
+
+Merge strategy
+--------------
+Lines from the *first* engine (Apple Vision) are always kept verbatim.
+Lines from subsequent engines are only added if they contain predominantly
+non-Latin script (Devanagari, Arabic, CJK, …). This prevents EasyOCR from
+duplicating numbers and English words that Apple Vision already captured with
+higher accuracy — EasyOCR contributes only what Apple Vision cannot read.
 """
 
 import logging
@@ -11,6 +19,38 @@ import logging
 from .base_engine import OCREngine
 
 logger = logging.getLogger(__name__)
+
+# Unicode ranges for non-Latin scripts we care about.
+# A line is "non-Latin" if it contains at least one char from these ranges,
+# meaning EasyOCR is the right engine for it.
+_NON_LATIN_RANGES = (
+    (0x0900, 0x097F),   # Devanagari (Hindi, Marathi, Nepali)
+    (0x0980, 0x09FF),   # Bengali
+    (0x0A00, 0x0A7F),   # Gurmukhi (Punjabi)
+    (0x0A80, 0x0AFF),   # Gujarati
+    (0x0B00, 0x0B7F),   # Odia
+    (0x0B80, 0x0BFF),   # Tamil
+    (0x0C00, 0x0C7F),   # Telugu
+    (0x0C80, 0x0CFF),   # Kannada
+    (0x0D00, 0x0D7F),   # Malayalam
+    (0x0600, 0x06FF),   # Arabic
+    (0x4E00, 0x9FFF),   # CJK Unified Ideographs
+    (0x3040, 0x30FF),   # Hiragana + Katakana
+    (0xAC00, 0xD7AF),   # Hangul syllables
+)
+
+
+def _is_non_latin(text: str) -> bool:
+    """Return True if the line contains at least one non-Latin script character.
+
+    Pure ASCII lines (digits, punctuation, English) return False — the primary
+    Apple Vision engine already handles those with better accuracy.
+    """
+    for c in text:
+        cp = ord(c)
+        if any(lo <= cp <= hi for lo, hi in _NON_LATIN_RANGES):
+            return True
+    return False
 
 
 class CompositeEngine(OCREngine):
@@ -57,12 +97,18 @@ class CompositeEngine(OCREngine):
     def recognize(self, image_path: str, languages: list = None) -> str:
         """
         Run each sub-engine with its assigned languages and merge results.
-        Duplicate lines (same text from both engines) are deduplicated.
+
+        The primary engine (index 0, Apple Vision) contributes all its lines.
+        Secondary engines (index 1+, EasyOCR) only contribute lines that are
+        predominantly non-Latin script — they do not re-add numbers or English
+        words that the primary engine already found more accurately.
+        Exact-string duplicates are also removed across all engines.
         """
         all_lines = []
         seen_lines = set()
 
-        for engine, engine_langs in self._engines:
+        for engine_idx, (engine, engine_langs) in enumerate(self._engines):
+            is_primary = engine_idx == 0
             try:
                 text = engine.recognize(image_path, languages=engine_langs)
             except Exception as exc:
@@ -71,10 +117,26 @@ class CompositeEngine(OCREngine):
                 )
                 continue
 
+            added = skipped_dup = skipped_latin = 0
             for line in text.splitlines():
                 stripped = line.strip()
-                if stripped and stripped not in seen_lines:
-                    seen_lines.add(stripped)
-                    all_lines.append(stripped)
+                if not stripped:
+                    continue
+                if stripped in seen_lines:
+                    skipped_dup += 1
+                    continue
+                # Secondary engines: skip lines that are mostly Latin/numeric
+                # (Apple Vision already handles those better)
+                if not is_primary and not _is_non_latin(stripped):
+                    skipped_latin += 1
+                    continue
+                seen_lines.add(stripped)
+                all_lines.append(stripped)
+                added += 1
+
+            logger.debug(
+                "Engine %s: added=%d  skipped_dup=%d  skipped_latin=%d",
+                engine.name, added, skipped_dup, skipped_latin,
+            )
 
         return "\n".join(all_lines)

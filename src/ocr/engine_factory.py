@@ -48,12 +48,16 @@ def get_engine(config: dict = None) -> OCREngine:
 
     if engine_name == "apple_vision":
         from .apple_vision_engine import AppleVisionEngine
-        return AppleVisionEngine()
+        return AppleVisionEngine(
+            recognition_level=ocr_config.get("recognition_level", "accurate"),
+            use_language_correction=ocr_config.get("use_language_correction", True),
+        )
 
     elif engine_name == "easyocr":
         from .easyocr_engine import EasyOCREngine
         gpu = ocr_config.get("easyocr_gpu", False)
-        return EasyOCREngine(gpu=gpu)
+        confidence = ocr_config.get("easyocr_confidence_threshold", 0.3)
+        return EasyOCREngine(gpu=gpu, confidence_threshold=confidence)
 
     elif engine_name == "composite":
         from .apple_vision_engine import AppleVisionEngine
@@ -65,9 +69,13 @@ def get_engine(config: dict = None) -> OCREngine:
         latin_langs = [l for l in languages if l not in _EASYOCR_LANGUAGES]
         if not latin_langs:
             latin_langs = ["en"]
+        confidence = ocr_config.get("easyocr_confidence_threshold", 0.3)
         return CompositeEngine([
-            (AppleVisionEngine(),      latin_langs),
-            (EasyOCREngine(gpu=gpu),   indic_langs),
+            (AppleVisionEngine(
+                recognition_level=ocr_config.get("recognition_level", "accurate"),
+                use_language_correction=ocr_config.get("use_language_correction", True),
+            ), latin_langs),
+            (EasyOCREngine(gpu=gpu, confidence_threshold=confidence), indic_langs),
         ])
 
     else:

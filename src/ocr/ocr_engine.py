@@ -6,6 +6,7 @@ Supports Apple Vision Framework (default for English) and EasyOCR (for Hindi and
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .engine_factory import get_engine
 
@@ -43,45 +44,57 @@ def run_ocr(frames: list, languages: list = None, config: dict = None) -> list:
         engine_config["languages"] = languages
 
     engine = get_engine(engine_config)
+    ocr_workers = engine_config.get("ocr_workers", 1)
 
     logger.info(
-        "Starting OCR on %d frame(s) | languages=%s | engine=%s",
-        len(frames), languages, engine.name
+        "Starting OCR on %d frame(s) | languages=%s | engine=%s | workers=%d",
+        len(frames), languages, engine.name, ocr_workers
     )
 
-    results = []
-    success_count = 0
-    error_count = 0
-
-    for i, frame in enumerate(frames, 1):
+    def _process_frame(frame):
         frame_path = frame["frame_path"]
         frame_name = frame["frame_name"]
-        timestamp = frame.get("timestamp", "")
-
         try:
             text = engine.recognize(frame_path, languages)
-            success_count += 1
             logger.debug("OCR completed for %s (%d chars)", frame_name, len(text))
-        except OCRError as exc:
-            logger.warning("OCR failed for %s: %s", frame_name, exc)
-            text = ""
-            error_count += 1
+            return frame_name, frame.get("timestamp", ""), frame.get("frame_number", 0), text, None
         except Exception as exc:
             logger.warning("OCR failed for %s: %s", frame_name, exc)
-            text = ""
-            error_count += 1
+            return frame_name, frame.get("timestamp", ""), frame.get("frame_number", 0), "", exc
 
+    if ocr_workers > 1:
+        ordered = [None] * len(frames)
+        with ThreadPoolExecutor(max_workers=ocr_workers) as executor:
+            future_to_idx = {executor.submit(_process_frame, frame): i for i, frame in enumerate(frames)}
+            done = 0
+            for future in as_completed(future_to_idx):
+                ordered[future_to_idx[future]] = future.result()
+                done += 1
+                if done % 10 == 0 or done == len(frames):
+                    logger.info("OCR progress: %d/%d frames processed", done, len(frames))
+        raw = ordered
+    else:
+        raw = []
+        for i, frame in enumerate(frames, 1):
+            raw.append(_process_frame(frame))
+            if i % 10 == 0:
+                logger.info("OCR progress: %d/%d frames processed", i, len(frames))
+
+    results = []
+    success_count = error_count = 0
+    for i, (frame_name, timestamp, frame_number, text, err) in enumerate(raw):
+        if err is None:
+            success_count += 1
+        else:
+            error_count += 1
         results.append({
             "frame_name": frame_name,
-            "frame_path": frame_path,
+            "frame_path": frames[i]["frame_path"],
             "timestamp": timestamp,
-            "frame_number": frame.get("frame_number", i),
+            "frame_number": frame_number,
             "ocr_text": text,
             "ocr_engine": engine.name,
         })
-
-        if i % 10 == 0:
-            logger.info("OCR progress: %d/%d frames processed", i, len(frames))
 
     logger.info(
         "OCR complete: %d success, %d errors out of %d frames (engine=%s)",

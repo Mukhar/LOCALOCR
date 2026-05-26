@@ -21,16 +21,21 @@ _readers = {}
 class EasyOCREngine(OCREngine):
     """OCR engine backed by EasyOCR (supports Hindi, English, and 80+ languages)."""
 
-    def __init__(self, gpu: bool = False):
+    def __init__(self, gpu: bool = False, confidence_threshold: float = 0.3):
         """
         Initialize EasyOCR engine.
 
         Parameters
         ----------
         gpu : bool
-            Whether to use GPU acceleration (requires CUDA). Default: False (CPU).
+            Whether to use GPU acceleration (MPS on Apple Silicon, CUDA on NVIDIA).
+        confidence_threshold : float
+            Minimum confidence score [0–1] to accept a recognised text line.
+            Lines below this score are discarded. Default 0.3.
+            Raise to 0.5+ for cleaner output; lower to 0.1 to capture faint text.
         """
         self._gpu = gpu
+        self._confidence_threshold = confidence_threshold
 
     @property
     def name(self) -> str:
@@ -77,7 +82,17 @@ class EasyOCREngine(OCREngine):
             return ""
 
         # results is list of (bbox, text, confidence)
-        text_lines = [entry[1] for entry in results if entry[1].strip()]
+        accepted = [
+            (text, conf) for _, text, conf in results
+            if text.strip() and conf >= self._confidence_threshold
+        ]
+        if len(results) != len(accepted):
+            logger.debug(
+                "%s: kept %d/%d lines (threshold=%.2f)",
+                Path(image_path).name, len(accepted), len(results),
+                self._confidence_threshold,
+            )
+        text_lines = [text for text, _ in accepted]
         return "\n".join(text_lines)
 
     def _get_reader(self, languages: list):

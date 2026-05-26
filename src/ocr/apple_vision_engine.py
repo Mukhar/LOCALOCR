@@ -16,6 +16,24 @@ logger = logging.getLogger(__name__)
 class AppleVisionEngine(OCREngine):
     """OCR engine backed by Apple's Vision Framework."""
 
+    def __init__(
+        self,
+        recognition_level: str = "accurate",
+        use_language_correction: bool = True,
+    ):
+        """
+        Parameters
+        ----------
+        recognition_level : str
+            "accurate" (default, higher quality) or "fast" (3-6× faster, good
+            enough for broadcast/news screens with large clear text).
+        use_language_correction : bool
+            Apply linguistic post-processing. Adds ~50-80ms per frame.
+            Set False for speed when text is unambiguous (tickers, lower-thirds).
+        """
+        self._recognition_level = recognition_level
+        self._use_language_correction = use_language_correction
+
     @property
     def name(self) -> str:
         return "apple_vision"
@@ -80,8 +98,11 @@ class AppleVisionEngine(OCREngine):
 
         # Create request
         request = Vision.VNRecognizeTextRequest.alloc().init()
-        request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
-        request.setUsesLanguageCorrection_(True)
+        if self._recognition_level == "fast":
+            request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelFast)
+        else:
+            request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+        request.setUsesLanguageCorrection_(self._use_language_correction)
 
         # Set languages if provided
         if languages:

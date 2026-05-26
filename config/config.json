@@ -2,11 +2,16 @@
   "video_path": "./input_videos/asset/low/25mayzeebiz.webm",
   "frame_interval_seconds": 3,
   "languages": [
-    "en"
+    "en",
+    "hi"
   ],
   "ocr_engine": "auto",
   "ocr_config": {
-    "easyocr_gpu": true
+    "easyocr_gpu": true,
+    "easyocr_confidence_threshold": 0.3,
+    "recognition_level": "fast",
+    "use_language_correction": false,
+    "ocr_workers": 1
   },
   "match_keywords": [
     "सेठी",
