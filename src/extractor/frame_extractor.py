@@ -122,6 +122,89 @@ def _format_timestamp(total_seconds: int) -> str:
     return f"{minutes:02d}m{seconds:02d}s"
 
 
+def _run_ffmpeg_with_progress(
+    cmd: list, duration: float, expected_frames: int, video_label: str, timeout: int
+) -> None:
+    """
+    Run ffmpeg and print a live progress bar by parsing `-progress pipe:1` output.
+
+    ffmpeg writes key=value lines to stdout; we read `out_time_ms` to compute
+    how far through the video we are and update a single line in the terminal.
+    """
+    import sys
+    import time
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        raise FrameExtractionError(f"Failed to launch ffmpeg: {exc}") from exc
+
+    stderr_lines = []
+    current_ms = 0
+    start_time = time.monotonic()
+
+    def _bar(pct: float, width: int = 30) -> str:
+        filled = int(width * pct / 100)
+        return f"[{'█' * filled}{'░' * (width - filled)}]"
+
+    try:
+        deadline = start_time + timeout
+        while True:
+            if time.monotonic() > deadline:
+                proc.kill()
+                raise FrameExtractionError(
+                    f"ffmpeg timed out after {timeout}s processing {video_label!r}"
+                )
+
+            line = proc.stdout.readline()
+            if not line:
+                break
+
+            line = line.strip()
+            if line.startswith("out_time_ms="):
+                try:
+                    current_ms = int(line.split("=", 1)[1])
+                except ValueError:
+                    pass
+                pct = min(100.0, (current_ms / 1000) / duration * 100) if duration else 0
+                elapsed = time.monotonic() - start_time
+                frames_so_far = int(pct / 100 * expected_frames)
+                print(
+                    f"\rExtracting frames  {_bar(pct)} {pct:5.1f}%  "
+                    f"~{frames_so_far}/{expected_frames} frames  "
+                    f"{elapsed:.1f}s",
+                    end="", flush=True,
+                )
+
+    except KeyboardInterrupt:
+        proc.kill()
+        print()
+        raise
+
+    proc.wait()
+    stderr_output = proc.stderr.read()
+
+    # Print final 100% line
+    elapsed = time.monotonic() - start_time
+    print(
+        f"\rExtracting frames  {_bar(100.0)} 100.0%  "
+        f"~{expected_frames}/{expected_frames} frames  "
+        f"{elapsed:.1f}s  done",
+        flush=True,
+    )
+
+    if proc.returncode != 0:
+        raise FrameExtractionError(
+            f"ffmpeg exited with code {proc.returncode} for {video_label!r}.\n"
+            f"stderr: {stderr_output.strip()}"
+        )
+
+
 def extract_frames(
     video_path: str,
     output_dir: str,
@@ -157,11 +240,14 @@ def extract_frames(
         ) from exc
 
     tmp_pattern = str(tmp_dir / "frame_%04d.png")
+    expected_frames = max(1, int(duration / interval_seconds))
 
     cmd = [
         ffmpeg_bin,
         "-hide_banner",
         "-loglevel", "error",
+        "-progress", "pipe:1",  # stream progress key=value to stdout
+        "-nostats",
         "-i", str(video),
         "-vf", f"fps=1/{interval_seconds}",
         "-vsync", "vfr",
@@ -171,21 +257,7 @@ def extract_frames(
     logger.debug("ffmpeg command: %s", " ".join(cmd))
 
     timeout = max(300, int(duration) * 3)
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        raise FrameExtractionError(
-            f"ffmpeg timed out after {timeout}s processing {str(video)!r}"
-        ) from exc
-    except OSError as exc:
-        raise FrameExtractionError(f"Failed to launch ffmpeg: {exc}") from exc
-
-    if result.returncode != 0:
-        raise FrameExtractionError(
-            f"ffmpeg exited with code {result.returncode} for {str(video)!r}.\n"
-            f"stderr: {result.stderr.strip()}"
-        )
+    _run_ffmpeg_with_progress(cmd, duration, expected_frames, str(video), timeout)
 
     tmp_frames = sorted(tmp_dir.glob("frame_*.png"))
 

@@ -3,12 +3,17 @@ pipeline_runner.py
 ~~~~~~~~~~~~~~~~~~
 Orchestrates the full LOCALOCR pipeline:
     Video → Frames → OCR → Match → Organize → Metadata
+
+Also provides run_ocr_only_pipeline for running OCR on already-extracted
+frames without re-running video extraction.
 """
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
+from typing import Optional
 
 from src.extractor import extract_frames, FrameExtractionError
 from src.ocr import run_ocr, OCRError
@@ -119,6 +124,140 @@ def run_pipeline(config: dict) -> dict:
 
     logger.info("=" * 60)
     logger.info("LOCALOCR Pipeline Complete")
+    logger.info("Total frames: %d", summary["total_frames"])
+    logger.info("Matched frames: %d", summary["matched_frames"])
+    logger.info("Categories: %s", summary["categories"])
+    logger.info("Processing time: %.2f seconds", elapsed)
+    logger.info("=" * 60)
+
+    return summary
+
+
+_FRAME_NAME_RE = re.compile(r"^frame_(\d{4})_(\d{2})m(\d{2})s\.\w+$")
+_SUPPORTED_IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
+
+
+def run_ocr_only_pipeline(config: dict, frames_dir: Optional[str] = None) -> dict:
+    """
+    Run OCR + matching + organizing on already-extracted frames.
+
+    Skips video extraction entirely. Reads images from *frames_dir*
+    (or ``<output_directory>/all_frames`` when not specified), then
+    runs the same OCR → match → organize → metadata steps as the full
+    pipeline.
+
+    Parameters
+    ----------
+    config : dict
+        Same config dict as ``run_pipeline``. ``video_path`` is not
+        required.  ``match_keywords`` must be present.
+    frames_dir : str | None
+        Directory containing the pre-extracted frame images.  When
+        ``None``, defaults to ``<output_directory>/all_frames``.
+
+    Returns
+    -------
+    dict with pipeline summary (same shape as ``run_pipeline`` minus
+    ``video_path``).
+    """
+    start_time = time.time()
+
+    keywords = config.get("match_keywords", [])
+    match_mode = config.get("match_mode", "contains")
+    languages = config.get("languages", ["en"])
+    output_dir = config.get("output_directory", "./output")
+
+    # Resolve frames source directory
+    if frames_dir:
+        src_dir = Path(frames_dir).resolve()
+    else:
+        src_dir = (Path(output_dir) / "all_frames").resolve()
+
+    if not src_dir.exists():
+        raise PipelineError(
+            f"Frames directory does not exist: {src_dir}\n"
+            "Run the full pipeline first or pass --frames-dir with a valid path."
+        )
+
+    image_files = sorted(
+        p for p in src_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in _SUPPORTED_IMAGE_EXTS
+    )
+
+    if not image_files:
+        raise PipelineError(
+            f"No image files found in: {src_dir}\n"
+            f"Supported extensions: {', '.join(_SUPPORTED_IMAGE_EXTS)}"
+        )
+
+    # Reconstruct frame dicts from filenames
+    frames = []
+    for p in image_files:
+        m = _FRAME_NAME_RE.match(p.name)
+        if m:
+            frames.append({
+                "frame_path": str(p),
+                "frame_name": p.name,
+                "timestamp": f"{m.group(2)}m{m.group(3)}s",
+                "frame_number": int(m.group(1)),
+            })
+        else:
+            frames.append({
+                "frame_path": str(p),
+                "frame_name": p.name,
+                "timestamp": "",
+                "frame_number": 0,
+            })
+
+    metadata_dir = (Path(output_dir) / "metadata").resolve()
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("=" * 60)
+    logger.info("LOCALOCR OCR-Only Pipeline Started")
+    logger.info("=" * 60)
+    logger.info("Frames directory: %s", src_dir)
+    logger.info("Frames found: %d", len(frames))
+    logger.info("Keywords: %s", keywords)
+    logger.info("Output: %s", output_dir)
+    logger.info("-" * 60)
+
+    # Step 1: OCR Processing
+    logger.info("[Step 1/3] Running OCR on %d frames...", len(frames))
+    try:
+        ocr_results = run_ocr(frames, languages, config)
+    except OCRError as exc:
+        raise PipelineError(f"OCR processing failed: {exc}") from exc
+    logger.info("[Step 1/3] OCR complete")
+
+    # Step 2: Text Matching
+    logger.info("[Step 2/3] Matching text against %d keywords...", len(keywords))
+    matched_results = match_text(ocr_results, keywords, match_mode)
+    logger.info("[Step 2/3] Matching complete")
+
+    # Step 3: File Organization
+    logger.info("[Step 3/3] Organizing files...")
+    org_summary = organize_frames(matched_results, output_dir)
+    logger.info("[Step 3/3] Organization complete")
+
+    # Metadata
+    logger.info("Generating metadata...")
+    metadata_file = _generate_metadata(matched_results, metadata_dir)
+
+    elapsed = time.time() - start_time
+
+    summary = {
+        "frames_dir": str(src_dir),
+        "total_frames": len(frames),
+        "ocr_processed": len(ocr_results),
+        "matched_frames": org_summary["matched_count"],
+        "unmatched_frames": org_summary["unmatched_count"],
+        "categories": org_summary["categories"],
+        "processing_time_seconds": round(elapsed, 2),
+        "metadata_file": str(metadata_file),
+    }
+
+    logger.info("=" * 60)
+    logger.info("LOCALOCR OCR-Only Pipeline Complete")
     logger.info("Total frames: %d", summary["total_frames"])
     logger.info("Matched frames: %d", summary["matched_frames"])
     logger.info("Categories: %s", summary["categories"])
