@@ -27,3 +27,5 @@ Thumbs.db
 
 
 *.mp4
+*.webm
+input_videos/*

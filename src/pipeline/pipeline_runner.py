@@ -84,7 +84,7 @@ def run_pipeline(config: dict) -> dict:
     # Step 2: OCR Processing
     logger.info("[Step 2/4] Running OCR on %d frames...", len(frames))
     try:
-        ocr_results = run_ocr(frames, languages)
+        ocr_results = run_ocr(frames, languages, config)
     except OCRError as exc:
         raise PipelineError(f"OCR processing failed: {exc}") from exc
 

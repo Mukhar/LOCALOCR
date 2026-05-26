@@ -1,15 +1,17 @@
 {
-  "video_path": "./input_videos/test_video.mp4",
-  "frame_interval_seconds": 1,
+  "video_path": "./input_videos/asset/low/25mayzeebiz.webm",
+  "frame_interval_seconds": 3,
   "languages": [
     "en"
   ],
+  "ocr_engine": "auto",
+  "ocr_config": {
+    "easyocr_gpu": true
+  },
   "match_keywords": [
-    "dashboard",
-    "payment",
-    "success",
-    "login",
-    "settings"
+    "सेठी",
+    "FII",
+    "Sethi"
   ],
   "match_mode": "contains",
   "output_directory": "./output",

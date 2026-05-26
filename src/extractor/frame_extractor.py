@@ -107,9 +107,11 @@ def _validate_inputs(video_path: str, interval_seconds: int) -> Path:
     if not path.is_file():
         raise FrameExtractionError(f"Path is not a regular file: {str(path)!r}")
 
-    if path.suffix.lower() != ".mp4":
+    SUPPORTED = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v"}
+    if path.suffix.lower() not in SUPPORTED:
         raise FrameExtractionError(
-            f"Unsupported file extension {path.suffix!r}. Only .mp4 files are accepted."
+            f"Unsupported file extension {path.suffix!r}. "
+            f"Accepted formats: {', '.join(sorted(SUPPORTED))}"
         )
 
     return path
