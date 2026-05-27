@@ -2,7 +2,7 @@
   "video_path": "./input_videos/asset/low/27MayZeeBiz.mp4",
   "frame_interval_seconds": 5,
   "languages": [
-    "en"
+    "en","hi"
   ],
   "ocr_engine": "auto",
   "ocr_config": {
@@ -16,7 +16,10 @@
   "match_keywords": [
     "FII",
     "Sethi",
-    "Jain"
+    "Jain",
+    "संदीप जैन की राय",
+    "सेठी",
+    "सदाबहार"
   ],
   "match_mode": "contains",
   "output_directory": "./output",
