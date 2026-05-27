@@ -122,86 +122,24 @@ def _format_timestamp(total_seconds: int) -> str:
     return f"{minutes:02d}m{seconds:02d}s"
 
 
-def _run_ffmpeg_with_progress(
-    cmd: list, duration: float, expected_frames: int, video_label: str, timeout: int
-) -> None:
-    """
-    Run ffmpeg and print a live progress bar by parsing `-progress pipe:1` output.
-
-    ffmpeg writes key=value lines to stdout; we read `out_time_ms` to compute
-    how far through the video we are and update a single line in the terminal.
-    """
-    import sys
-    import time
-
+def _run_ffmpeg(cmd: list, video_label: str, timeout: int) -> None:
+    """Run ffmpeg and raise on failure."""
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        result = subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, timeout=timeout,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise FrameExtractionError(
+            f"ffmpeg timed out after {timeout}s processing {video_label!r}"
+        ) from exc
     except OSError as exc:
         raise FrameExtractionError(f"Failed to launch ffmpeg: {exc}") from exc
 
-    stderr_lines = []
-    current_ms = 0
-    start_time = time.monotonic()
-
-    def _bar(pct: float, width: int = 30) -> str:
-        filled = int(width * pct / 100)
-        return f"[{'█' * filled}{'░' * (width - filled)}]"
-
-    try:
-        deadline = start_time + timeout
-        while True:
-            if time.monotonic() > deadline:
-                proc.kill()
-                raise FrameExtractionError(
-                    f"ffmpeg timed out after {timeout}s processing {video_label!r}"
-                )
-
-            line = proc.stdout.readline()
-            if not line:
-                break
-
-            line = line.strip()
-            if line.startswith("out_time_ms="):
-                try:
-                    current_ms = int(line.split("=", 1)[1])
-                except ValueError:
-                    pass
-                pct = min(100.0, (current_ms / 1000) / duration * 100) if duration else 0
-                elapsed = time.monotonic() - start_time
-                frames_so_far = int(pct / 100 * expected_frames)
-                print(
-                    f"\rExtracting frames  {_bar(pct)} {pct:5.1f}%  "
-                    f"~{frames_so_far}/{expected_frames} frames  "
-                    f"{elapsed:.1f}s",
-                    end="", flush=True,
-                )
-
-    except KeyboardInterrupt:
-        proc.kill()
-        print()
-        raise
-
-    proc.wait()
-    stderr_output = proc.stderr.read()
-
-    # Print final 100% line
-    elapsed = time.monotonic() - start_time
-    print(
-        f"\rExtracting frames  {_bar(100.0)} 100.0%  "
-        f"~{expected_frames}/{expected_frames} frames  "
-        f"{elapsed:.1f}s  done",
-        flush=True,
-    )
-
-    if proc.returncode != 0:
+    if result.returncode != 0:
         raise FrameExtractionError(
-            f"ffmpeg exited with code {proc.returncode} for {video_label!r}.\n"
-            f"stderr: {stderr_output.strip()}"
+            f"ffmpeg exited with code {result.returncode} for {video_label!r}.\n"
+            f"stderr: {result.stderr.strip()}"
         )
 
 
@@ -232,6 +170,10 @@ def extract_frames(
     tmp_dir = out_path / ".tmp_extract"
 
     try:
+        # Clean up stale temp files from any interrupted previous run
+        if tmp_dir.exists():
+            for stale in tmp_dir.iterdir():
+                stale.unlink(missing_ok=True)
         out_path.mkdir(parents=True, exist_ok=True)
         tmp_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -246,8 +188,6 @@ def extract_frames(
         ffmpeg_bin,
         "-hide_banner",
         "-loglevel", "error",
-        "-progress", "pipe:1",  # stream progress key=value to stdout
-        "-nostats",
         "-i", str(video),
         "-vf", f"fps=1/{interval_seconds}",
         "-vsync", "vfr",
@@ -256,8 +196,15 @@ def extract_frames(
 
     logger.debug("ffmpeg command: %s", " ".join(cmd))
 
+    dur_min = int(duration) // 60
+    dur_sec = int(duration) % 60
+    logger.info(
+        "Extracting ~%d frames from %dm%ds video (this may take a while)...",
+        expected_frames, dur_min, dur_sec,
+    )
+
     timeout = max(300, int(duration) * 3)
-    _run_ffmpeg_with_progress(cmd, duration, expected_frames, str(video), timeout)
+    _run_ffmpeg(cmd, str(video), timeout)
 
     tmp_frames = sorted(tmp_dir.glob("frame_*.png"))
 

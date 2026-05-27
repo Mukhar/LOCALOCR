@@ -1,6 +1,6 @@
 {
-  "video_path": "./input_videos/asset/low/25mayzeebiz.webm",
-  "frame_interval_seconds": 3,
+  "video_path": "./input_videos/asset/low/27MayZeeBiz.mp4",
+  "frame_interval_seconds": 5,
   "languages": [
     "en"
   ],
@@ -14,9 +14,9 @@
     "ocr_workers": 1
   },
   "match_keywords": [
-    "सेठी",
     "FII",
-    "Sethi"
+    "Sethi",
+    "Jain"
   ],
   "match_mode": "contains",
   "output_directory": "./output",

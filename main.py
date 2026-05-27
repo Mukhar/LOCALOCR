@@ -76,11 +76,58 @@ def load_config(config_path: str, ocr_only: bool = False) -> dict:
     return config
 
 
+_CONFIG_HELP = """
+config file reference:
+  Required keys:
+    video_path               string   Path to the input video file
+                                      (not required when using --ocr-only)
+    match_keywords           list     Keywords to search for in OCR text
+                                      e.g. ["FII", "Sethi", "Jain"]
+
+  Optional keys:
+    frame_interval_seconds   int      Seconds between captured frames
+                                      default: 2
+    languages                list     OCR language codes
+                                      e.g. ["en"] or ["hi", "en"]
+    ocr_engine               string   "auto" | "apple_vision" | "easyocr" | "composite"
+                                      default: "auto"  (apple_vision for en-only, composite for others)
+    match_mode               string   "contains" | "exact" | "regex"
+                                      default: "contains"
+    output_directory         string   Base output path
+                                      default: "./output"
+    log_directory            string   Log file destination
+                                      default: "./logs"
+
+  ocr_config (nested object):
+    apple_vision_workers     int      Parallel processes for Apple Vision OCR
+                                      default: 4
+    recognition_level        string   "accurate" | "fast"
+                                      default: "accurate"
+    use_language_correction  bool     Apply language correction heuristics
+                                      default: false
+    easyocr_gpu              bool     Use GPU acceleration for EasyOCR
+                                      default: false
+    easyocr_confidence_threshold
+                             float    Minimum confidence score (0.0-1.0)
+                                      default: 0.3
+    ocr_workers              int      Worker threads for OCR dispatch
+                                      default: 1
+
+examples:
+  python main.py                                        run with default config
+  python main.py ./config/config.json                   run with explicit config
+  python main.py --ocr-only                             skip extraction, OCR existing frames
+  python main.py --ocr-only --frames-dir ./my_frames    OCR frames from a custom directory
+"""
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
         prog="localocr",
         description="LOCALOCR - Local Video Screen OCR Pipeline for macOS",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_CONFIG_HELP,
     )
     parser.add_argument(
         "config",
