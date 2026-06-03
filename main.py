@@ -49,7 +49,7 @@ def setup_logging(log_dir: str = "./logs"):
     return log_file
 
 
-def load_config(config_path: str, ocr_only: bool = False) -> dict:
+def load_config(config_path: str, ocr_only: bool = False, input_override: str = None) -> dict:
     """Load and validate JSON config file."""
     path = Path(config_path).resolve()
 
@@ -64,9 +64,9 @@ def load_config(config_path: str, ocr_only: bool = False) -> dict:
         print(f"Error: Invalid JSON in config file: {exc}")
         sys.exit(1)
 
-    # video_path is only required for the full pipeline
-    if not ocr_only and "video_path" not in config:
-        print("Error: 'video_path' is required in config for the full pipeline")
+    # video_path is required for the full pipeline unless supplied via --input
+    if not ocr_only and "video_path" not in config and not input_override:
+        print("Error: 'video_path' is required in config (or pass --input <video>) for the full pipeline")
         sys.exit(1)
 
     if "match_keywords" not in config:
@@ -116,6 +116,7 @@ config file reference:
 examples:
   python main.py                                        run with default config
   python main.py ./config/config.json                   run with explicit config
+  python main.py --input ./video.mp4 --output ./out     override input/output via args
   python main.py --ocr-only                             skip extraction, OCR existing frames
   python main.py --ocr-only --frames-dir ./my_frames    OCR frames from a custom directory
 """
@@ -146,6 +147,18 @@ def main():
         default=None,
         help="Directory containing pre-extracted frames (default: <output_directory>/all_frames)",
     )
+    parser.add_argument(
+        "--input",
+        metavar="VIDEO",
+        default=None,
+        help="Path to input video file (overrides config video_path)",
+    )
+    parser.add_argument(
+        "--output",
+        metavar="DIR",
+        default=None,
+        help="Base output directory (overrides config output_directory)",
+    )
     args = parser.parse_args()
 
     mode_label = "OCR-Only Mode" if args.ocr_only else "Full Pipeline"
@@ -156,7 +169,13 @@ def main():
     print()
 
     # Load config
-    config = load_config(args.config, ocr_only=args.ocr_only)
+    config = load_config(args.config, ocr_only=args.ocr_only, input_override=args.input)
+
+    # CLI arg overrides (take priority over config file values)
+    if args.input:
+        config["video_path"] = str(Path(args.input).resolve())
+    if args.output:
+        config["output_directory"] = str(Path(args.output).resolve())
 
     # Setup logging
     log_file = setup_logging(config.get("log_directory", "./logs"))
