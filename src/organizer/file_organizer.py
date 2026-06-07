@@ -5,7 +5,9 @@ Organize matched frames into categorized folders based on matched keywords.
 """
 
 import logging
+import re
 import shutil
+import unicodedata
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -86,8 +88,13 @@ def organize_frames(matched_results: list, output_dir: str) -> dict:
 
 def _sanitize_folder_name(keyword: str) -> str:
     """Convert keyword to a safe folder name."""
-    # Lowercase, replace spaces/special chars with underscores
-    safe = keyword.lower().strip()
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in safe)
-    safe = safe.strip("_")
+    # Preserve Unicode letters/marks (e.g., Devanagari matras), while
+    # normalizing separators and punctuation to underscores.
+    safe = unicodedata.normalize("NFC", keyword).strip().lower()
+    safe = "".join(
+        c if (c.isalnum() or unicodedata.category(c).startswith("M") or c in "-_")
+        else "_"
+        for c in safe
+    )
+    safe = re.sub(r"_+", "_", safe).strip("_")
     return safe or "uncategorized"
