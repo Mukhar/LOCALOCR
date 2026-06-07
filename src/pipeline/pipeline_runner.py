@@ -19,6 +19,7 @@ from src.extractor import extract_frames, FrameExtractionError
 from src.ocr import run_ocr, OCRError
 from src.matcher import match_text
 from src.organizer import organize_frames
+from src.analyzer import analyze_with_ollama, OllamaAnalysisError
 
 logger = logging.getLogger(__name__)
 
@@ -101,9 +102,26 @@ def run_pipeline(config: dict) -> dict:
     logger.info("[Step 3/4] Matching complete")
 
     # Step 4: File Organization
-    logger.info("[Step 4/4] Organizing files...")
+    logger.info("[Step 4/5] Organizing files...")
     org_summary = organize_frames(matched_results, output_dir)
-    logger.info("[Step 4/4] Organization complete")
+    logger.info("[Step 4/5] Organization complete")
+
+    # Step 5: Ollama Vision Analysis (optional)
+    ollama_cfg = config.get("ollama_config", {})
+    ollama_summary = None
+    if ollama_cfg.get("enabled", False):
+        matched_dir = str(out_path / "matched")
+        logger.info("[Step 5/5] Running Ollama vision analysis...")
+        try:
+            ollama_summary = analyze_with_ollama(matched_dir, output_dir, ollama_cfg)
+            logger.info(
+                "[Step 5/5] Ollama analysis complete: %d/%d succeeded",
+                ollama_summary["succeeded"], ollama_summary["total"],
+            )
+        except OllamaAnalysisError as exc:
+            logger.error("[Step 5/5] Ollama analysis failed: %s", exc)
+    else:
+        logger.info("[Step 5/5] Ollama analysis skipped (set ollama_config.enabled=true to enable)")
 
     # Generate Metadata
     logger.info("Generating metadata...")
@@ -120,6 +138,7 @@ def run_pipeline(config: dict) -> dict:
         "categories": org_summary["categories"],
         "processing_time_seconds": round(elapsed, 2),
         "metadata_file": str(metadata),
+        "ollama_analysis": ollama_summary,
     }
 
     logger.info("=" * 60)
@@ -235,9 +254,27 @@ def run_ocr_only_pipeline(config: dict, frames_dir: Optional[str] = None) -> dic
     logger.info("[Step 2/3] Matching complete")
 
     # Step 3: File Organization
-    logger.info("[Step 3/3] Organizing files...")
+    logger.info("[Step 3/4] Organizing files...")
     org_summary = organize_frames(matched_results, output_dir)
-    logger.info("[Step 3/3] Organization complete")
+    logger.info("[Step 3/4] Organization complete")
+
+    # Step 4: Ollama Vision Analysis (optional)
+    ollama_cfg = config.get("ollama_config", {})
+    ollama_summary = None
+    out_path = Path(output_dir).resolve()
+    if ollama_cfg.get("enabled", False):
+        matched_dir = str(out_path / "matched")
+        logger.info("[Step 4/4] Running Ollama vision analysis...")
+        try:
+            ollama_summary = analyze_with_ollama(matched_dir, output_dir, ollama_cfg)
+            logger.info(
+                "[Step 4/4] Ollama analysis complete: %d/%d succeeded",
+                ollama_summary["succeeded"], ollama_summary["total"],
+            )
+        except OllamaAnalysisError as exc:
+            logger.error("[Step 4/4] Ollama analysis failed: %s", exc)
+    else:
+        logger.info("[Step 4/4] Ollama analysis skipped (set ollama_config.enabled=true to enable)")
 
     # Metadata
     logger.info("Generating metadata...")
@@ -254,6 +291,7 @@ def run_ocr_only_pipeline(config: dict, frames_dir: Optional[str] = None) -> dic
         "categories": org_summary["categories"],
         "processing_time_seconds": round(elapsed, 2),
         "metadata_file": str(metadata_file),
+        "ollama_analysis": ollama_summary,
     }
 
     logger.info("=" * 60)

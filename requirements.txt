@@ -2,3 +2,4 @@ pyobjc-framework-Vision>=11.0
 pyobjc-framework-Quartz>=11.0
 Pillow>=10.0
 easyocr>=1.7
+requests>=2.31.0

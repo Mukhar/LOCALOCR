@@ -24,6 +24,7 @@ Thumbs.db
 # Temp
 *.tmp
 .tmp_extract/
+tmp/
 
 
 *.mp4
