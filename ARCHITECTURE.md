@@ -35,6 +35,11 @@ graph TB
     MATCHER[TextMatcher<br/>Keyword Matching]
     ORGANIZER[FileOrganizer<br/>Categorized Output]
     META[Metadata Generator<br/>JSON Output]
+    POST[PostOCRPipeline<br/>post_ocr_pipeline.py]
+    P1[Phase 1<br/>Vision Extraction]
+    P2[Phase 2<br/>Deduplication]
+    P3[Phase 3<br/>HTML Dashboard]
+    OLLAMA[Ollama<br/>Local LLM / Vision]
 
     CLI --> CONFIG
     CLI --> PIPELINE
@@ -49,6 +54,11 @@ graph TB
     FACTORY --> COMPOSITE
     COMPOSITE --> APPLE
     COMPOSITE --> EASY
+    POST --> P1
+    POST --> P2
+    POST --> P3
+    P1 --> OLLAMA
+    P2 --> OLLAMA
 ```
 
 ### 2.2 Directory Layout
@@ -56,10 +66,14 @@ graph TB
 ```
 LOCALOCR/
 ├── main.py                          # CLI, arg parsing, logging setup
+├── post_ocr_pipeline.py             # Standalone LLM post-OCR pipeline (Phase 1-3)
 ├── config/
 │   └── config.json                  # Pipeline configuration
 ├── src/
 │   ├── __init__.py
+│   ├── analyzer/
+│   │   ├── __init__.py
+│   │   └── ollama_analyzer.py       # Low-level Ollama vision helper (ad-hoc use)
 │   ├── extractor/
 │   │   ├── __init__.py
 │   │   └── frame_extractor.py       # ffmpeg-based video → PNG frames
@@ -76,7 +90,7 @@ LOCALOCR/
 │   │   └── text_matcher.py          # Keyword/regex matching
 │   ├── organizer/
 │   │   ├── __init__.py
-│   │   └── file_organizer.py        # File copy + categorization
+│   │   └── file_organizer.py        # File copy + categorization (Unicode-safe)
 │   └── pipeline/
 │       ├── __init__.py
 │       └── pipeline_runner.py       # Full pipeline orchestration
@@ -84,8 +98,11 @@ LOCALOCR/
 ├── output/
 │   ├── all_frames/                  # Every extracted frame
 │   ├── matched/<keyword>/           # Frames matching each keyword
+│   ├── viewer.html                  # Self-contained stock picks HTML dashboard
 │   └── metadata/
-│       └── ocr_results.json         # Full OCR + match metadata
+│       ├── ocr_results.json         # Full OCR + match metadata
+│       ├── phase1_extractions.json  # Per-frame LLM extraction results
+│       └── phase2_deduplicated.json # Final deduplicated stock picks
 └── logs/
     └── localocr.log                 # Debug-level execution log
 ```
@@ -351,8 +368,10 @@ output/
 ### 8.2 Folder Name Sanitization
 
 Keywords are converted to safe folder names:
+- NFC Unicode normalization applied first
 - Lowercased
-- Non-alphanumeric characters → `_`
+- Non-alphanumeric characters → `_`, **except** Unicode combining marks (category `M`) which are preserved — this keeps Devanagari/Indic matras (ि, ी, ू …) intact in folder names like `सेठी/`
+- Consecutive underscores collapsed to one
 - Leading/trailing underscores stripped
 - Empty result → `"uncategorized"`
 
@@ -470,6 +489,7 @@ PipelineError (fatal, stops pipeline)
 | `pyobjc-framework-Quartz` | ≥11.0 | Image loading (CGImage) |
 | `Pillow` | ≥10.0 | Image format support |
 | `easyocr` | ≥1.7 | Multilingual OCR (Hindi, 80+ languages) |
+| `requests` | ≥2.31 | Ollama REST API calls (post-OCR pipeline) |
 
 ### 12.3 Transitive Dependencies (via EasyOCR)
 
@@ -524,20 +544,95 @@ PipelineError (fatal, stops pipeline)
 
 ---
 
-## 14. Extensibility Points
+## 14. Post-OCR Pipeline (`post_ocr_pipeline.py`)
+
+Standalone LLM-powered analysis layer that runs **after** the main pipeline, operating on `output/matched/`.
+
+### 14.1 Phase Sequence
+
+```mermaid
+sequenceDiagram
+    participant CLI as post_ocr_pipeline.py
+    participant P1 as Phase 1<br/>Vision Extraction
+    participant P2 as Phase 2<br/>Deduplication
+    participant P3 as Phase 3<br/>HTML Dashboard
+    participant OL as Ollama API
+    participant FS as Filesystem
+
+    CLI->>P1: phase1_extract(matched_dir)
+    loop each image in matched/<keyword>/
+        P1->>OL: POST /api/generate + base64 image (pass 1)
+        OL-->>P1: JSON stock-pick array
+        alt required fields null
+            P1->>OL: POST /api/generate + partial result (pass 2)
+            OL-->>P1: filled JSON
+        end
+        P1->>P1: _apply_folder_analyst()
+    end
+    P1-->>FS: phase1_extractions.json
+
+    CLI->>P2: phase2_dedup(p1_results)
+    P2->>OL: POST /api/generate + all picks (merge prompt)
+    OL-->>P2: deduplicated JSON array
+    P2-->>FS: phase2_deduplicated.json
+
+    CLI->>CLI: _enrich_with_frame_paths()
+    CLI->>P3: phase3_html_async() [background thread]
+    P3-->>FS: viewer.html
+```
+
+### 14.2 Extraction Result Dict (Phase 1)
+
+```python
+{
+    "keyword":              "sethi",          # matched folder name
+    "frame_name":           "frame_0023.png",
+    "frame_path":           "/abs/path/…",
+    "raw_response":         "…",              # pass-1 raw LLM text
+    "raw_retry_response":   "…",              # pass-2 raw LLM text (or null)
+    "retried":              True,
+    "analysis":             [{"analyst": "Sethi", "stockPick": "RELIANCE", …}],
+    "parse_error":          None,
+    "error":                None
+}
+```
+
+### 14.3 HTML Dashboard Features
+
+| Feature | Detail |
+|---------|--------|
+| Filter | Live search by stock name or analyst |
+| Sort | Stock name, analyst, target price, stop loss |
+| Upside % | Computed `(target − current) / current × 100` with green/red colouring |
+| Screenshot link | `📷 View screenshot` links to source frame (relative path) |
+| Dark theme | CSS custom properties, card grid layout |
+| Self-contained | Single HTML file, no external dependencies |
+
+### 14.4 Key Implementation Notes
+
+- **Two-pass extraction**: Pass 1 extracts; pass 2 retries only if required fields are null, feeding the partial JSON back to the model.
+- **Graceful interrupt**: `threading.Event(_stop_event)` checked before every Ollama call; partial Phase-1 data is always written to disk.
+- **Frame-path enrichment**: `_enrich_with_frame_paths()` maps deduplicated picks back to source frames by `stockPick` name (first match wins; paths stored relative to `viewer.html`).
+- **Fallback**: Phase 2 Ollama failure → returns undeduped Phase-1 picks unchanged.
+- **Plug-in entry-point**: `run_post_ocr_pipeline(config)` accepts the same config dict as the main pipeline.
+
+---
+
+## 15. Extensibility Points
 
 | Extension | How to Implement |
-|-----------|-----------------|
+|-----------|------------------|
 | New OCR engine | Subclass `OCREngine` in `src/ocr/`, register in `engine_factory.py` |
 | New match mode | Add branch in `text_matcher._is_match()` |
 | New pipeline step | Add to `pipeline_runner.run_pipeline()` between existing steps |
 | New output format | Add alongside `_generate_metadata()` in pipeline runner |
 | Batch video processing | Loop over video paths calling `run_pipeline()` per video |
-| LLM integration | Post-process `ocr_results.json` with Ollama/local LLM |
+| New Ollama extraction fields | Add to `REQUIRED_FIELDS` and update `EXTRACTION_PROMPT` in `post_ocr_pipeline.py` |
+| Different LLM provider | Swap `_ollama_post()` with a compatible function in `post_ocr_pipeline.py` |
 
 ---
 
-## 15. Security Considerations
+## 16. Security Considerations
 
 - **No shell injection**: All subprocess calls use list-based args (never `shell=True`)
 - **Local-only**: Zero network calls, no data exfiltration possible

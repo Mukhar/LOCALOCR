@@ -17,6 +17,13 @@ main.py (CLI entry point)
     │       └── src/ocr/composite_engine.py (multi-engine merge)
     ├── src/matcher/text_matcher.py (keyword matching)
     └── src/organizer/file_organizer.py (file categorization)
+
+post_ocr_pipeline.py (standalone post-OCR pipeline)
+├── Phase 1 — Vision Extraction (Ollama vision model → structured JSON picks)
+├── Phase 2 — Deduplication (Ollama LLM merge/dedup)
+└── Phase 3 — HTML Dashboard (viewer.html, runs in background thread)
+
+src/analyzer/ollama_analyzer.py (lower-level Ollama vision helper)
 ```
 
 ## Key Conventions
@@ -27,7 +34,8 @@ main.py (CLI entry point)
 - **Logging**: Standard `logging` module with module-level loggers
 - **Error hierarchy**: Each module defines its own exception (e.g., `FrameExtractionError`, `OCRError`, `PipelineError`)
 - **Config**: Single JSON file at `config/config.json`
-- **Output**: `output/all_frames/`, `output/matched/<keyword>/`, `output/metadata/`
+- **Output**: `output/all_frames/`, `output/matched/<keyword>/`, `output/metadata/`, `output/viewer.html`
+- **Hindi/Devanagari folders**: `file_organizer` NFC-normalizes keywords and preserves Unicode combining marks (category `M`) so Devanagari folder names (e.g. `सेठी/`) are intact on disk
 
 ## Module Responsibilities
 
@@ -53,7 +61,46 @@ Pluggable OCR engine system:
 Matches OCR text against keywords. Supports `contains`, `exact`, and `regex` modes. Case-insensitive.
 
 ### `src/organizer/file_organizer.py`
-Copies matched frames into `output/matched/<keyword>/` folders. Sanitizes keyword to safe folder names.
+Copies matched frames into `output/matched/<keyword>/` folders. Sanitizes keyword to safe folder names while preserving Unicode combining marks so Devanagari/Indic script keywords produce readable folder names.
+
+## Post-OCR Pipeline (`post_ocr_pipeline.py`)
+
+Standalone LLM-powered analysis layer that runs **after** the main OCR pipeline. Operates on the `output/matched/` folders produced by the main pipeline.
+
+### Phases
+
+| Phase | Name | What it does |
+|-------|------|-------------|
+| 1 | Vision Extraction | Iterates `matched/<keyword>/` frames, sends each image to an Ollama vision model, and extracts structured JSON stock-pick records (`analyst`, `stockPick`, `recommended_price`, `current_price`, `stop_loss`, `target`). Two-pass extraction: pass 2 retries only if required fields are null. |
+| 2 | Deduplication | Aggregates all Phase-1 picks and sends them to Ollama as a single prompt. Ollama merges partial duplicates, fills nulls, and returns a deduplicated JSON array. Falls back to undeduped data on failure. |
+| 3 | HTML Dashboard | Builds `output/viewer.html` — a self-contained, filterable/sortable dark-theme stock picks dashboard. Runs in a `ThreadPoolExecutor` daemon thread so it never blocks the pipeline. |
+
+### Key features
+- **Two-pass extraction**: Pass 1 extracts, Pass 2 retries with partial result if fields are null.
+- **Graceful interrupt**: `threading.Event(_stop_event)` checked before every Ollama call; partial Phase-1 data is always saved.
+- **Frame path enrichment**: `_enrich_with_frame_paths()` maps deduplicated picks back to source frames (by `stockPick` name) so the dashboard can show screenshot links.
+- **Upside calculation**: Dashboard computes gain% from `current_price` to `target` inline in JS.
+- **Folder-analyst override**: `_apply_folder_analyst()` tags each pick with the matched keyword (folder name) as the analyst field if the model doesn't detect one.
+
+### Metadata outputs
+
+| File | Contents |
+|------|---------|
+| `output/metadata/phase1_extractions.json` | Full per-frame extraction results including raw LLM responses and parse errors |
+| `output/metadata/phase2_deduplicated.json` | Final deduplicated picks array |
+| `output/viewer.html` | Self-contained HTML dashboard |
+
+### CLI usage
+```bash
+python post_ocr_pipeline.py
+python post_ocr_pipeline.py --matched-dir ./output/matched --output-dir ./output
+python post_ocr_pipeline.py --model gemma4 --url http://localhost:11434
+python post_ocr_pipeline.py --skip-dedup   # skip Phase 2
+```
+
+## `src/analyzer/ollama_analyzer.py`
+
+Lower-level helper for sending individual matched frames to an Ollama vision model. Used for ad-hoc analysis and testing. Returns per-frame result dicts with `frame_name`, `frame_path`, `model`, `prompt`, `analysis`, `error`, and `elapsed_seconds`. Not used by the main pipeline — the production path goes through `post_ocr_pipeline.py`.
 
 ## Configuration Schema (`config/config.json`)
 
@@ -77,6 +124,10 @@ python main.py ./config/config.json
 
 # OCR-only mode (skip frame extraction, use existing frames)
 python main.py --ocr-only --frames-dir ./output/all_frames
+
+# Post-OCR pipeline (LLM analysis of matched frames → HTML dashboard)
+python post_ocr_pipeline.py
+python post_ocr_pipeline.py --matched-dir ./output/matched --model gemma4
 ```
 
 ## Dependencies
@@ -85,6 +136,7 @@ python main.py --ocr-only --frames-dir ./output/all_frames
 - `pyobjc-framework-Vision` + `pyobjc-framework-Quartz` (Apple Vision OCR)
 - `Pillow` (image handling)
 - `easyocr` (multilingual OCR, optional for Hindi support)
+- `requests` (Ollama API calls in post-OCR pipeline)
 
 ## Parallelism Model
 
