@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LOCALOCR — Architecture Diagram</title>
+<style>
+  :root {
+    --bg: #0a0e17; --surface: #131825; --surface2: #1a2035;
+    --border: #2a3050; --border-hi: #4060c0;
+    --blue: #4a8af4; --blue-dim: #2a5ab0; --blue-glow: rgba(74,138,244,.25);
+    --green: #22c55e; --green-dim: #166534; --green-glow: rgba(34,197,94,.2);
+    --purple: #a855f7; --purple-dim: #6b21a8; --purple-glow: rgba(168,85,247,.2);
+    --orange: #f59e0b; --orange-dim: #92400e; --orange-glow: rgba(245,158,11,.2);
+    --red: #ef4444; --red-dim: #991b1b; --red-glow: rgba(239,68,68,.2);
+    --cyan: #06b6d4; --cyan-dim: #155e75; --cyan-glow: rgba(6,182,212,.2);
+    --pink: #ec4899; --pink-dim: #9d174d; --pink-glow: rgba(236,72,153,.2);
+    --text: #e2e8f0; --muted: #64748b; --dim: #475569;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Inter', 'SF Pro Display', system-ui, sans-serif; min-height: 100vh; overflow-x: hidden; }
+
+  /* Header */
+  .header { padding: 2.5rem 3rem 1rem; }
+  .header h1 { font-size: 2rem; font-weight: 800; background: linear-gradient(135deg, var(--blue), var(--purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .header p { color: var(--muted); font-size: .9rem; margin-top: .3rem; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: .5rem; padding: 0 3rem; margin-bottom: 1.5rem; }
+  .tab { padding: .5rem 1.2rem; border-radius: 99px; font-size: .82rem; font-weight: 600; cursor: pointer;
+    background: var(--surface); border: 1px solid var(--border); color: var(--muted); transition: all .25s; }
+  .tab:hover { border-color: var(--blue); color: var(--text); }
+  .tab.active { background: var(--blue); border-color: var(--blue); color: #fff; }
+
+  /* Views */
+  .view { display: none; padding: 0 3rem 3rem; }
+  .view.active { display: block; }
+
+  /* ── PIPELINE VIEW ─────────────────────────── */
+  .pipeline { display: flex; align-items: center; gap: 0; flex-wrap: nowrap; overflow-x: auto; padding-bottom: 1rem; }
+  .stage { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: .6rem; }
+  .stage-box { width: 160px; padding: 1.2rem 1rem; border-radius: var(--radius); text-align: center; cursor: pointer;
+    transition: all .3s; position: relative; border: 1.5px solid var(--border); background: var(--surface); }
+  .stage-box:hover { transform: translateY(-4px); }
+  .stage-box .icon { font-size: 1.6rem; margin-bottom: .4rem; display: block; }
+  .stage-box .label { font-weight: 700; font-size: .85rem; }
+  .stage-box .sub { font-size: .7rem; color: var(--muted); margin-top: .25rem; }
+  .arrow { flex: 0 0 50px; display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 1.4rem; }
+
+  /* Color coding */
+  .stage-box.s-extract { border-color: var(--green-dim); }
+  .stage-box.s-extract:hover { border-color: var(--green); box-shadow: 0 8px 30px var(--green-glow); }
+  .stage-box.s-ocr { border-color: var(--blue-dim); }
+  .stage-box.s-ocr:hover { border-color: var(--blue); box-shadow: 0 8px 30px var(--blue-glow); }
+  .stage-box.s-match { border-color: var(--orange-dim); }
+  .stage-box.s-match:hover { border-color: var(--orange); box-shadow: 0 8px 30px var(--orange-glow); }
+  .stage-box.s-org { border-color: var(--purple-dim); }
+  .stage-box.s-org:hover { border-color: var(--purple); box-shadow: 0 8px 30px var(--purple-glow); }
+  .stage-box.s-llm { border-color: var(--pink-dim); }
+  .stage-box.s-llm:hover { border-color: var(--pink); box-shadow: 0 8px 30px var(--pink-glow); }
+  .stage-box.s-input { border-color: var(--cyan-dim); }
+  .stage-box.s-input:hover { border-color: var(--cyan); box-shadow: 0 8px 30px var(--cyan-glow); }
+
+  /* Detail panel */
+  .detail-panel { margin-top: 2rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 2rem; min-height: 200px; transition: border-color .3s; }
+  .detail-panel h3 { font-size: 1.1rem; font-weight: 700; margin-bottom: .6rem; }
+  .detail-panel .meta { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  .detail-panel .chip { font-size: .72rem; padding: .2rem .7rem; border-radius: 99px; font-weight: 600; }
+  .chip-file { background: #1a2940; color: var(--blue); }
+  .chip-hw { background: #1a3020; color: var(--green); }
+  .chip-warn { background: #2a2010; color: var(--orange); }
+  .detail-panel ul { padding-left: 1.2rem; }
+  .detail-panel li { font-size: .85rem; color: var(--text); line-height: 1.7; }
+  .detail-panel code { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: .78rem; background: var(--surface2); padding: .15rem .4rem; border-radius: 4px; color: var(--cyan); }
+
+  /* ── COMPONENT VIEW ────────────────────────── */
+  .comp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.2rem; }
+  .comp-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 1.4rem 1.6rem; transition: all .3s; cursor: default; }
+  .comp-card:hover { border-color: var(--border-hi); transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0,0,0,.3); }
+  .comp-card .cc-icon { font-size: 1.4rem; margin-bottom: .5rem; display: block; }
+  .comp-card h4 { font-size: .95rem; font-weight: 700; margin-bottom: .2rem; }
+  .comp-card .cc-path { font-size: .72rem; color: var(--muted); font-family: monospace; margin-bottom: .6rem; }
+  .comp-card p { font-size: .82rem; color: var(--text); line-height: 1.6; }
+  .comp-card .dep-tag { display: inline-block; font-size: .68rem; padding: .15rem .5rem; border-radius: 99px; margin-right: .3rem; margin-top: .4rem;
+    background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
+
+  /* ── DATA FLOW VIEW ────────────────────────── */
+  .flow-track { display: flex; flex-direction: column; gap: 0; }
+  .flow-step { display: flex; align-items: stretch; gap: 0; }
+  .flow-line { width: 50px; display: flex; flex-direction: column; align-items: center; flex-shrink: 0; }
+  .flow-dot { width: 14px; height: 14px; border-radius: 50%; border: 2.5px solid var(--blue); background: var(--bg); flex-shrink: 0; z-index: 1; }
+  .flow-connector { width: 2px; flex: 1; background: var(--border); }
+  .flow-content { flex: 1; padding: .8rem 0 1.8rem 1rem; }
+  .flow-content h4 { font-size: .9rem; font-weight: 700; }
+  .flow-content .flow-desc { font-size: .8rem; color: var(--muted); margin-top: .2rem; }
+  .flow-content pre { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: .8rem 1rem;
+    font-size: .75rem; color: var(--cyan); margin-top: .5rem; overflow-x: auto; font-family: 'JetBrains Mono', monospace; }
+  .flow-step:nth-child(1) .flow-dot { border-color: var(--cyan); }
+  .flow-step:nth-child(2) .flow-dot { border-color: var(--green); }
+  .flow-step:nth-child(3) .flow-dot { border-color: var(--blue); }
+  .flow-step:nth-child(4) .flow-dot { border-color: var(--orange); }
+  .flow-step:nth-child(5) .flow-dot { border-color: var(--purple); }
+  .flow-step:nth-child(6) .flow-dot { border-color: var(--pink); }
+
+  /* ── PARALLELISM VIEW ──────────────────────── */
+  .para-section { margin-bottom: 2rem; }
+  .para-section h3 { font-size: 1rem; font-weight: 700; margin-bottom: .8rem; display: flex; align-items: center; gap: .5rem; }
+  .para-section h3 .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .para-lanes { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .para-lane { flex: 1; min-width: 200px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 1.2rem; }
+  .para-lane h5 { font-size: .82rem; font-weight: 700; margin-bottom: .5rem; }
+  .para-lane p { font-size: .78rem; color: var(--muted); line-height: 1.6; }
+  .para-lane .badge { display: inline-block; font-size: .68rem; padding: .15rem .5rem; border-radius: 99px; font-weight: 600; margin-top: .4rem; }
+  .badge-green { background: var(--green-dim); color: var(--green); }
+  .badge-blue { background: #1a2940; color: var(--blue); }
+  .badge-orange { background: #2a2010; color: var(--orange); }
+  .badge-red { background: #2a1515; color: var(--red); }
+
+  /* Legend */
+  .legend { display: flex; gap: 1.5rem; flex-wrap: wrap; padding: 1rem 0; margin-bottom: 1rem; }
+  .legend-item { display: flex; align-items: center; gap: .4rem; font-size: .75rem; color: var(--muted); }
+  .legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+  .legend-dot.l-input { background: var(--cyan); }
+  .legend-dot.l-extract { background: var(--green); }
+  .legend-dot.l-ocr { background: var(--blue); }
+  .legend-dot.l-match { background: var(--orange); }
+  .legend-dot.l-org { background: var(--purple); }
+  .legend-dot.l-llm { background: var(--pink); }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .header, .tabs, .view { padding-left: 1.2rem; padding-right: 1.2rem; }
+    .pipeline { flex-wrap: wrap; justify-content: center; }
+    .arrow { transform: rotate(90deg); flex: 0 0 30px; }
+  }
+
+  /* Animations */
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+  .view.active > * { animation: fadeUp .4s ease-out both; }
+  .view.active > *:nth-child(2) { animation-delay: .05s; }
+  .view.active > *:nth-child(3) { animation-delay: .1s; }
+  .view.active > *:nth-child(4) { animation-delay: .15s; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>&#9608; LOCALOCR — Architecture Diagram</h1>
+  <p>Interactive system architecture for the local video-to-text OCR pipeline</p>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-view="pipeline">Pipeline Flow</div>
+  <div class="tab" data-view="components">Components</div>
+  <div class="tab" data-view="dataflow">Data Flow</div>
+  <div class="tab" data-view="parallelism">Parallelism</div>
+</div>
+
+<!-- ═════════════════════════════════════════════════════════════════════════ -->
+<!-- PIPELINE VIEW                                                           -->
+<!-- ═════════════════════════════════════════════════════════════════════════ -->
+<div class="view active" id="v-pipeline">
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot l-input"></div>Input</div>
+    <div class="legend-item"><div class="legend-dot l-extract"></div>Extraction</div>
+    <div class="legend-item"><div class="legend-dot l-ocr"></div>OCR</div>
+    <div class="legend-item"><div class="legend-dot l-match"></div>Matching</div>
+    <div class="legend-item"><div class="legend-dot l-org"></div>Organization</div>
+    <div class="legend-item"><div class="legend-dot l-llm"></div>LLM Analysis</div>
+  </div>
+
+  <div class="pipeline">
+    <div class="stage"><div class="stage-box s-input" data-detail="input"><span class="icon">&#9654;</span><span class="label">Video Input</span><span class="sub">MP4 / MKV / MOV</span></div></div>
+    <div class="arrow">→</div>
+    <div class="stage"><div class="stage-box s-extract" data-detail="extract"><span class="icon">&#9998;</span><span class="label">Frame Extraction</span><span class="sub">ffmpeg subprocess</span></div></div>
+    <div class="arrow">→</div>
+    <div class="stage"><div class="stage-box s-ocr" data-detail="ocr"><span class="icon">&#128270;</span><span class="label">Multi-Engine OCR</span><span class="sub">Apple Vision + EasyOCR</span></div></div>
+    <div class="arrow">→</div>
+    <div class="stage"><div class="stage-box s-match" data-detail="match"><span class="icon">&#9733;</span><span class="label">Text Matching</span><span class="sub">contains / regex</span></div></div>
+    <div class="arrow">→</div>
+    <div class="stage"><div class="stage-box s-org" data-detail="org"><span class="icon">&#128193;</span><span class="label">File Organization</span><span class="sub">keyword folders</span></div></div>
+    <div class="arrow">→</div>
+    <div class="stage"><div class="stage-box s-llm" data-detail="llm"><span class="icon">&#9881;</span><span class="label">LLM Analysis</span><span class="sub">Ollama Vision</span></div></div>
+  </div>
+
+  <div class="detail-panel" id="detail-panel">
+    <h3>&#10148; Click a pipeline stage to see details</h3>
+    <p style="color:var(--muted)">Each box represents a major stage in the LOCALOCR pipeline. Click any stage to explore its internals, file locations, and key implementation details.</p>
+  </div>
+</div>
+
+<!-- ═════════════════════════════════════════════════════════════════════════ -->
+<!-- COMPONENTS VIEW                                                         -->
+<!-- ═════════════════════════════════════════════════════════════════════════ -->
+<div class="view" id="v-components">
+  <div class="comp-grid">
+    <div class="comp-card">
+      <span class="cc-icon">&#9654;</span>
+      <h4>main.py — CLI Entry Point</h4>
+      <div class="cc-path">main.py</div>
+      <p>Parses CLI args (argparse), loads JSON config, sets up dual logging (console + file), dispatches to <code>run_pipeline()</code> or <code>run_ocr_only_pipeline()</code>.</p>
+      <span class="dep-tag">argparse</span><span class="dep-tag">json</span><span class="dep-tag">logging</span>
+    </div>
+    <div class="comp-card">
+      <span class="cc-icon">&#9776;</span>
+      <h4>PipelineRunner — Orchestrator</h4>
+      <div class="cc-path">src/pipeline/pipeline_runner.py</div>
+      <p>Orchestrates the 4–5 step pipeline: Extract → OCR → Match → Organize → (Ollama). Generates metadata JSON. Provides both full pipeline and OCR-only modes.</p>
+      <span class="dep-tag">extractor</span><span class="dep-tag">ocr</span><span class="dep-tag">matcher</span><span class="dep-tag">organizer</span><span class="dep-tag">analyzer</span>
+    </div>
+    <div class="comp-card">
+      <span class="cc-icon">&#9998;</span>
+      <h4>FrameExtractor</h4>
+      <div class="cc-path">src/extractor/frame_extractor.py</div>
+      <p>Extracts PNG frames from video at configurable intervals using <code>ffmpeg</code> + <code>ffprobe</code> subprocess calls. Validates inputs, probes duration, handles temp files. Naming: <code>frame_NNNN_XXmYYs.png</code></p>
+      <span class="dep-tag">ffmpeg</span><span class="dep-tag">ffprobe</span><span class="dep-tag">subprocess</span>
+    </div>
+    <div class="comp-card">
+      <span class="cc-icon">&#10074;&#10074;</span>
+      <h4>OCREngine — Abstract Base</h4>
+      <div class="cc-path">src/ocr/base_engine.py</div>
+      <p>ABC defining the engine contract: <code>recognize()</code>, <code>supported_languages()</code>, <code>name</code>, <code>max_parallel_frames</code>, <code>supports_multiprocessing</code>. All engines implement this interface.</p>
+      <span class="dep-tag">abc.ABC</span>
+    </div>
+    <div class="comp-card">
+      <span class="cc-icon">&#9650;</span>
+      <h4>AppleVisionEngine</h4>
+      <div class="cc-path">src/ocr/apple_vision_engine.py</div>
+      <p>macOS Vision Framework via PyObjC. Uses <code>VNRecognizeTextRequest</code> on Apple Neural Engine. Supports <code>accurate</code> / <code>fast</code> recognition levels. Multi-process safe via <code>spawn</code>.</p>
+      <span class="dep-tag">PyObjC</span><span class="dep-tag">Vision.framework</span><span class="dep-tag">ANE</span>
+    </div>
+    <div class="comp-card">
+      <span class="cc-icon">&#9670;</span>
+      <h4>EasyOCREngine</h4>
+      <div class="cc-path">src/ocr/easyocr_engine.py</div>
+      <p>PyTorch-backed multilingual OCR (80+ languages including Hindi/Devanagari). Thread-safe via global <code>_readtext_lock</code>. Readers cached per language combo. Confidence filtering.</p>
+      <span class="dep-tag">EasyOCR</span><span class="dep-tag">PyTorch</span><span class="dep-tag">MPS GPU</span>
+    </div>
+    <div class="comp-card">
+      <span class="cc-icon">&#10697;</span>
+      <h4>CompositeEngine</h4>
+      <div class="cc-path">src/ocr/composite_engine.py</div>
+      <p>Runs Apple Vision + EasyOCR concurrently via ThreadPoolExecutor. Script-aware merge: primary (Apple Vision) keeps all lines, secondary (EasyOCR) contributes only non-Latin text. Deduplicates exact matches.</p>
+      <span class="dep-tag">ThreadPoolExecutor</span><span class="dep-tag">Unicode ranges</span>
+    </div>
+    <div class="comp-card">
+      <span class="cc-icon">&#9881;</span>
+      <h4>EngineFactory</h4>
+      <div class="cc-path">src/ocr/engine_factory.py</div>
+      <p>Auto-selects engine by language config: en-only → Apple Vision, Indic-only → EasyOCR, mixed → Composite. Also accepts explicit <code>ocr_engine</code> override.</p>
+      <span class="dep-tag">Strategy pattern</span>
+    </div>
+    <div class="comp-card">
+      <span class="cc-icon">&#10148;</span>
+      <h4>OCR Dispatcher</h4>
+      <div class="cc-path">src/ocr/ocr_engine.py</div>
+      <p>Public <code>run_ocr()</code> function. Selects execution mode: ProcessPoolExecutor (spawn) for Apple Vision, ThreadPoolExecutor for others, serial for workers=1. Module-level worker init for pickling.</p>
+      <span class="dep-tag">multiprocessing</span><span class="dep-tag">concurrent.futures</span>
+    </div>
+    <div class="comp-card">
+      <span class="cc-icon">&#9733;</span>
+      <h4>TextMatcher</h4>
+      <div class="cc-path">src/matcher/text_matcher.py</div>
+      <p>Matches OCR text against keywords. Three modes: <code>contains</code> (case-insensitive substring), <code>exact</code> (full-line match), <code>regex</code> (Python re). Enriches results with <code>matched</code> and <code>matched_keywords</code>.</p>
+      <span class="dep-tag">re</span>
+    </div>
+    <div class="comp-card">
+      <span class="cc-icon">&#128193;</span>
+      <h4>FileOrganizer</h4>
+      <div class="cc-path">src/organizer/file_organizer.py</div>
+      <p>Copies matched frames to <code>output/matched/&lt;keyword&gt;/</code>. NFC-normalizes keywords to safe folder names while preserving Unicode combining marks for Devanagari (सेठी/).</p>
+      <span class="dep-tag">shutil</span><span class="dep-tag">unicodedata</span>
+    </div>
+    <div class="comp-card">
+      <span class="cc-icon">&#9672;</span>
+      <h4>PostOCRPipeline</h4>
+      <div class="cc-path">post_ocr_pipeline.py</div>
+      <p>3-phase LLM pipeline: Phase 1 (Vision Extraction → structured JSON stock picks, two-pass), Phase 2 (Deduplication via Ollama), Phase 3 (HTML Dashboard in background thread). Graceful interrupt via threading.Event.</p>
+      <span class="dep-tag">Ollama API</span><span class="dep-tag">requests</span><span class="dep-tag">threading</span>
+    </div>
+  </div>
+</div>
+
+<!-- ═════════════════════════════════════════════════════════════════════════ -->
+<!-- DATA FLOW VIEW                                                          -->
+<!-- ═════════════════════════════════════════════════════════════════════════ -->
+<div class="view" id="v-dataflow">
+  <div class="flow-track">
+    <div class="flow-step">
+      <div class="flow-line"><div class="flow-dot"></div><div class="flow-connector"></div></div>
+      <div class="flow-content">
+        <h4>① Config Loaded</h4>
+        <div class="flow-desc">JSON config parsed → pipeline parameters resolved</div>
+        <pre>{
+  "video_path": "./input_videos/video.mp4",
+  "languages": ["en", "hi"],
+  "match_keywords": ["FII", "सेठी"],
+  "ocr_engine": "auto"
+}</pre>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-line"><div class="flow-dot"></div><div class="flow-connector"></div></div>
+      <div class="flow-content">
+        <h4>② Frame Dicts (post-extraction)</h4>
+        <div class="flow-desc">ffmpeg extracts PNGs → list of frame metadata dicts</div>
+        <pre>{
+  "frame_path": "/abs/path/frame_0001_00m00s.png",
+  "frame_name": "frame_0001_00m00s.png",
+  "timestamp": "00m00s",
+  "frame_number": 1
+}</pre>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-line"><div class="flow-dot"></div><div class="flow-connector"></div></div>
+      <div class="flow-content">
+        <h4>③ OCR Result Dicts (post-OCR)</h4>
+        <div class="flow-desc">Engine processes each frame → enriched with text + engine name</div>
+        <pre>{
+  "frame_name": "frame_0001_00m00s.png",
+  "frame_path": "/abs/path/...",
+  "timestamp": "00m00s",
+  "ocr_text": "Net FII Activity: +2500 Cr\nसेठी: BUY RELIANCE",
+  "ocr_engine": "composite(apple_vision+easyocr)"
+}</pre>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-line"><div class="flow-dot"></div><div class="flow-connector"></div></div>
+      <div class="flow-content">
+        <h4>④ Matched Result Dicts (post-matching)</h4>
+        <div class="flow-desc">TextMatcher enriches with match status + matched keywords</div>
+        <pre>{
+  "frame_name": "frame_0012_00m33s.png",
+  "ocr_text": "FII Net Activity: +2500 Cr",
+  "ocr_engine": "apple_vision",
+  "matched": true,
+  "matched_keywords": ["FII"]
+}</pre>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-line"><div class="flow-dot"></div><div class="flow-connector"></div></div>
+      <div class="flow-content">
+        <h4>⑤ File Organization Output</h4>
+        <div class="flow-desc">Matched frames copied to categorized folders</div>
+        <pre>output/
+├── all_frames/frame_0001_00m00s.png
+├── matched/
+│   ├── fii/frame_0012_00m33s.png
+│   └── सेठी/frame_0023_01m06s.png
+└── metadata/ocr_results.json</pre>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-line"><div class="flow-dot"></div></div>
+      <div class="flow-content">
+        <h4>⑥ LLM Extraction Output (Post-OCR Pipeline)</h4>
+        <div class="flow-desc">Ollama vision → structured stock picks → deduped → HTML dashboard</div>
+        <pre>{
+  "analyst": "Sethi",
+  "stockPick": "RELIANCE",
+  "recommended_price": 2400,
+  "current_price": 2380,
+  "stop_loss": 2300,
+  "target": 2600,
+  "_frame_path": "matched/sethi/frame_0023.png"
+}</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═════════════════════════════════════════════════════════════════════════ -->
+<!-- PARALLELISM VIEW                                                        -->
+<!-- ═════════════════════════════════════════════════════════════════════════ -->
+<div class="view" id="v-parallelism">
+  <div class="para-section">
+    <h3><div class="dot" style="background:var(--green)"></div> Apple Vision — Multiprocessing (spawn)</h3>
+    <div class="para-lanes">
+      <div class="para-lane">
+        <h5>Main Process</h5>
+        <p>OCR Dispatcher creates <code>ProcessPoolExecutor</code> with <code>spawn</code> context. Distributes frames via <code>pool.map()</code> with chunked dispatch.</p>
+        <span class="badge badge-green">Orchestrator</span>
+      </div>
+      <div class="para-lane">
+        <h5>Worker 1</h5>
+        <p>Own Python GIL, own PyObjC runtime. Initializes fresh <code>AppleVisionEngine</code>. Warms up with first frame. Submits to ANE.</p>
+        <span class="badge badge-blue">ANE Submission</span>
+      </div>
+      <div class="para-lane">
+        <h5>Worker 2</h5>
+        <p>Overlaps CPU image decode of next frame with ANE inference on current frame. True hardware parallelism.</p>
+        <span class="badge badge-blue">ANE Submission</span>
+      </div>
+      <div class="para-lane">
+        <h5>Worker N</h5>
+        <p>Configurable via <code>apple_vision_workers</code>. Benchmarked: 3× throughput at 4 workers vs single-threaded.</p>
+        <span class="badge badge-blue">ANE Submission</span>
+      </div>
+    </div>
+    <p style="font-size:.78rem;color:var(--muted);margin-top:.8rem"> Why <code>spawn</code> not <code>fork</code>? PyObjC Objective-C runtime is not fork-safe. Each worker must initialize its own Vision Framework handle.</p>
+  </div>
+
+  <div class="para-section">
+    <h3><div class="dot" style="background:var(--orange)"></div> EasyOCR — Thread-Safe Serial</h3>
+    <div class="para-lanes">
+      <div class="para-lane">
+        <h5>Global Lock</h5>
+        <p><code>_readtext_lock = threading.Lock()</code> serializes all <code>readtext()</code> calls. PyTorch model is not thread-safe for concurrent inference.</p>
+        <span class="badge badge-orange">Serial Execution</span>
+      </div>
+      <div class="para-lane">
+        <h5>Reader Cache</h5>
+        <p>EasyOCR <code>Reader</code> instances cached per language combo in module-level <code>_readers</code> dict. Models downloaded once (~100MB) to <code>~/.EasyOCR/</code>.</p>
+        <span class="badge badge-orange">Lazy Singleton</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="para-section">
+    <h3><div class="dot" style="background:var(--blue)"></div> Composite — Concurrent Engines</h3>
+    <div class="para-lanes">
+      <div class="para-lane">
+        <h5>ThreadPoolExecutor</h5>
+        <p>Apple Vision and EasyOCR run simultaneously via thread pool. No resource contention — they use <strong>different hardware</strong>.</p>
+        <span class="badge badge-blue">Concurrent</span>
+      </div>
+      <div class="para-lane">
+        <h5>Apple Vision → CPU/ANE</h5>
+        <p>Processes Latin/English text using Apple Neural Engine. Primary engine — all lines kept verbatim.</p>
+        <span class="badge badge-green">Primary</span>
+      </div>
+      <div class="para-lane">
+        <h5>EasyOCR → MPS GPU</h5>
+        <p>Processes Devanagari/Indic text using Metal Performance Shaders GPU. Secondary — only non-Latin lines kept.</p>
+        <span class="badge badge-orange">Secondary</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="para-section">
+    <h3><div class="dot" style="background:var(--pink)"></div> Post-OCR — LLM Pipeline Threading</h3>
+    <div class="para-lanes">
+      <div class="para-lane">
+        <h5>Phase 1 & 2</h5>
+        <p>Sequential Ollama API calls (one image at a time). Each call checks <code>_stop_event</code> before proceeding. Partial data always saved on interrupt.</p>
+        <span class="badge badge-red">Sequential + Interruptible</span>
+      </div>
+      <div class="para-lane">
+        <h5>Phase 3 — Background Thread</h5>
+        <p>HTML dashboard built in <code>ThreadPoolExecutor(max_workers=1)</code> daemon thread. Never blocks the main pipeline. 120s timeout.</p>
+        <span class="badge badge-blue">Background Thread</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Tab switching
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('v-' + tab.dataset.view).classList.add('active');
+  });
+});
+
+// Pipeline detail panel
+const details = {
+  input: {
+    title: '&#9654; Video Input',
+    chips: [
+      { text: 'config/config.json', cls: 'chip-file' },
+      { text: 'Formats: .mp4 .mkv .mov .webm .avi .m4v', cls: 'chip-hw' }
+    ],
+    items: [
+      'Video file path configured in <code>config.json</code> or via <code>--input</code> CLI flag',
+      'Validated by <code>frame_extractor._validate_inputs()</code> — checks existence, file type, supported extension',
+      'Supports single-file processing (batch processing planned for Phase 2)',
+      'Path resolved to absolute via <code>Path.resolve()</code> before processing'
+    ]
+  },
+  extract: {
+    title: '&#9998; Frame Extraction',
+    chips: [
+      { text: 'src/extractor/frame_extractor.py', cls: 'chip-file' },
+      { text: 'ffmpeg + ffprobe', cls: 'chip-hw' },
+      { text: 'No shell=True', cls: 'chip-warn' }
+    ],
+    items: [
+      '<code>ffprobe</code> probes video duration (JSON output, timeout 30s)',
+      '<code>ffmpeg -vf fps=1/N</code> extracts frames to temp directory <code>.tmp_extract/</code>',
+      'Frames renamed to <code>frame_NNNN_XXmYYs.png</code> (4-digit sequential + timestamp)',
+      'Temp directory cleaned up after extraction (stale files from interrupted runs cleared)',
+      'Timeout: <code>max(300, duration × 3)</code> seconds',
+      'Expected ~1200 frames for a 1-hour video at 3s intervals'
+    ]
+  },
+  ocr: {
+    title: '&#128270; Multi-Engine OCR System',
+    chips: [
+      { text: 'src/ocr/*.py (6 files)', cls: 'chip-file' },
+      { text: 'Apple Neural Engine', cls: 'chip-hw' },
+      { text: 'MPS GPU', cls: 'chip-hw' },
+      { text: 'Strategy Pattern', cls: 'chip-warn' }
+    ],
+    items: [
+      '<strong>Engine Factory</strong> auto-selects: en-only → Apple Vision, Indic-only → EasyOCR, mixed → Composite',
+      '<strong>Apple Vision</strong>: macOS Vision Framework via PyObjC, ~27ms/frame (fast) or ~160ms/frame (accurate)',
+      '<strong>EasyOCR</strong>: PyTorch-backed, 80+ languages, MPS GPU acceleration, thread-safe via global lock',
+      '<strong>Composite</strong>: runs both engines concurrently on different hardware, merges with script-aware dedup',
+      '<strong>Parallelism</strong>: ProcessPoolExecutor(spawn) for Apple Vision, ThreadPoolExecutor for composite',
+      'Progress reported every 20 frames. Results ordered by original frame index.'
+    ]
+  },
+  match: {
+    title: '&#9733; Text Matching',
+    chips: [
+      { text: 'src/matcher/text_matcher.py', cls: 'chip-file' },
+      { text: 'Unicode-safe', cls: 'chip-hw' }
+    ],
+    items: [
+      '<strong>contains</strong>: case-insensitive substring search (default)',
+      '<strong>exact</strong>: case-insensitive full-line match',
+      '<strong>regex</strong>: Python <code>re.search()</code> with <code>IGNORECASE</code>',
+      'Enriches each result dict with <code>matched: bool</code> and <code>matched_keywords: list</code>',
+      'Supports Unicode keywords (Hindi: "सेठी", "संदीप जैन की राय")',
+      'Invalid regex patterns caught and logged as warnings'
+    ]
+  },
+  org: {
+    title: '&#128193; File Organization',
+    chips: [
+      { text: 'src/organizer/file_organizer.py', cls: 'chip-file' },
+      { text: 'NFC Unicode Normalization', cls: 'chip-hw' }
+    ],
+    items: [
+      'Matched frames copied to <code>output/matched/&lt;keyword&gt;/</code>',
+      'Keyword → folder name via <code>_sanitize_folder_name()</code>: NFC normalize → lowercase → safe chars only',
+      'Unicode combining marks (category M) preserved for Devanagari matras (ि, ी, ू)',
+      'Example: keyword "सेठी" → folder <code>सेठी/</code> (readable on disk)',
+      'Returns summary: <code>matched_count</code>, <code>unmatched_count</code>, <code>categories</code> dict'
+    ]
+  },
+  llm: {
+    title: '&#9881; LLM Analysis (Post-OCR Pipeline)',
+    chips: [
+      { text: 'post_ocr_pipeline.py', cls: 'chip-file' },
+      { text: 'Ollama API', cls: 'chip-hw' },
+      { text: 'Graceful Interrupt', cls: 'chip-warn' }
+    ],
+    items: [
+      '<strong>Phase 1 — Vision Extraction</strong>: each matched image → Ollama vision model → structured JSON stock-pick records. Two-pass: pass 2 retries only if required fields are null.',
+      '<strong>Phase 2 — Deduplication</strong>: all Phase 1 picks sent to Ollama for merge/dedup. Falls back to undeduped data on failure.',
+      '<strong>Phase 3 — HTML Dashboard</strong>: <code>viewer.html</code> built in background thread (ThreadPoolExecutor daemon). Self-contained, filterable, sortable dark-theme dashboard.',
+      '<code>threading.Event(_stop_event)</code> checked before every Ollama call for graceful interrupt',
+      'Metadata outputs: <code>phase1_extractions.json</code>, <code>phase2_deduplicated.json</code>, <code>viewer.html</code>',
+      'Frame-path enrichment maps deduplicated picks back to source screenshots'
+    ]
+  }
+};
+
+document.querySelectorAll('.stage-box').forEach(box => {
+  box.addEventListener('click', () => {
+    const key = box.dataset.detail;
+    const d = details[key];
+    if (!d) return;
+    const panel = document.getElementById('detail-panel');
+    const chips = d.chips.map(c => `<span class="chip ${c.cls}">${c.text}</span>`).join('');
+    const items = d.items.map(i => `<li>${i}</li>`).join('');
+    panel.innerHTML = `<h3>${d.title}</h3><div class="meta">${chips}</div><ul>${items}</ul>`;
+    panel.style.borderColor = getComputedStyle(box).borderColor;
+  });
+});
+</script>
+</body>
+</html>
