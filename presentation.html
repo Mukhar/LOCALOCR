@@ -1,0 +1,1093 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LOCALOCR — Local Video-to-Text OCR Pipeline</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    :root {
+      --primary: #0071CE;
+      --secondary: #041E42;
+      --accent: #FFC220;
+      --text-main: #E8EDF2;
+      --text-light: #FFFFFF;
+      --text-muted: #8A9BB5;
+      --bg-body: #020C1B;
+      --bg-slide: #0A1628;
+      --bg-card: rgba(10, 30, 60, 0.7);
+      --bg-card-solid: #0D2240;
+      --border-subtle: rgba(0, 113, 206, 0.25);
+      --font-main: 'Everyday Sans Web', 'Segoe UI', -apple-system, Arial, sans-serif;
+      --glow-primary: 0 0 30px rgba(0, 113, 206, 0.3);
+      --glow-accent: 0 0 20px rgba(255, 194, 32, 0.2);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: var(--font-main);
+      background: var(--bg-body);
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* ── Slide Container ── */
+    .slide {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100vw; height: 100vh;
+      background: var(--bg-slide);
+      padding: 60px 70px;
+      color: var(--text-main);
+      display: flex;
+      flex-direction: column;
+      opacity: 0;
+      transform: translateX(60px);
+      pointer-events: none;
+      transition: opacity 0.55s cubic-bezier(0.4, 0, 0.2, 1),
+                  transform 0.55s cubic-bezier(0.4, 0, 0.2, 1);
+      overflow: hidden;
+    }
+    .slide.active {
+      opacity: 1;
+      transform: translateX(0);
+      pointer-events: auto;
+      z-index: 10;
+    }
+
+    /* ── Ambient Background Elements ── */
+    .slide::before {
+      content: '';
+      position: absolute;
+      top: -200px; right: -200px;
+      width: 600px; height: 600px;
+      background: radial-gradient(circle, rgba(0, 113, 206, 0.06) 0%, transparent 70%);
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .slide::after {
+      content: '';
+      position: absolute;
+      bottom: -150px; left: -150px;
+      width: 500px; height: 500px;
+      background: radial-gradient(circle, rgba(255, 194, 32, 0.04) 0%, transparent 70%);
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Title Slide ── */
+    .title-slide {
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      background: linear-gradient(155deg, #020C1B 0%, #0A1628 40%, #0D2240 100%);
+    }
+    .title-slide::before {
+      width: 900px; height: 900px;
+      top: -300px; right: -300px;
+      background: radial-gradient(circle, rgba(0, 113, 206, 0.1) 0%, transparent 60%);
+    }
+
+    .title-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(0, 113, 206, 0.12);
+      border: 1px solid rgba(0, 113, 206, 0.3);
+      padding: 8px 22px;
+      border-radius: 30px;
+      font-size: 14px;
+      color: var(--primary);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 30px;
+      z-index: 1;
+    }
+
+    .title-slide h1 {
+      color: var(--text-light);
+      font-size: clamp(64px, 8vw, 96px);
+      font-weight: 800;
+      letter-spacing: -2px;
+      margin-bottom: 16px;
+      z-index: 1;
+      background: linear-gradient(135deg, #FFFFFF 0%, #0071CE 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .title-slide .subtitle {
+      color: var(--text-muted);
+      font-size: clamp(22px, 3vw, 30px);
+      font-weight: 400;
+      margin-bottom: 12px;
+      z-index: 1;
+    }
+    .title-slide .tagline {
+      color: var(--accent);
+      font-size: clamp(16px, 2vw, 20px);
+      font-weight: 500;
+      margin-bottom: 50px;
+      z-index: 1;
+    }
+
+    /* Icon Pipelinee Slide */
+    .icon-pipeline {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      z-index: 1;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .icon-pipeline .pipe-step {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .icon-pipeline .pipe-icon {
+      width: 64px; height: 64px;
+      background: rgba(0, 113, 206, 0.12);
+      border: 2px solid rgba(0, 113, 206, 0.35);
+      border-radius: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 26px;
+      color: var(--primary);
+      transition: all 0.3s;
+    }
+    .icon-pipeline .pipe-icon:hover {
+      background: rgba(0, 113, 206, 0.2);
+      border-color: var(--primary);
+      box-shadow: var(--glow-primary);
+    }
+    .icon-pipeline .pipe-label {
+      font-size: 12px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .icon-pipeline .pipe-arrow {
+      font-size: 20px;
+      color: var(--accent);
+      margin-top: -20px;
+    }
+
+    /* ── Content Slide Typography ── */
+    h1 {
+      color: var(--text-light);
+      font-size: clamp(36px, 4.5vw, 48px);
+      font-weight: 700;
+      margin-bottom: 6px;
+      z-index: 1;
+      letter-spacing: -0.5px;
+    }
+    .slide-label {
+      display: inline-block;
+      font-size: 12px;
+      color: var(--primary);
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      margin-bottom: 14px;
+      z-index: 1;
+    }
+    h2 {
+      color: var(--text-main);
+      font-size: clamp(20px, 3vw, 26px);
+      font-weight: 400;
+      margin-bottom: 30px;
+      z-index: 1;
+    }
+    h2 .hl {
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    /* ── Two-Column Layout ── */
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 40px;
+      flex: 1;
+      z-index: 1;
+      align-items: start;
+    }
+
+    .col-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 16px;
+      padding: 32px;
+      backdrop-filter: blur(8px);
+      height: 100%;
+    }
+    .col-card.problem {
+      border-color: rgba(230, 70, 70, 0.3);
+      background: rgba(230, 70, 70, 0.04);
+    }
+    .col-card.solution {
+      border-color: rgba(0, 113, 206, 0.4);
+      background: rgba(0, 113, 206, 0.06);
+    }
+
+    .col-card .card-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .col-card .card-header .icon-circle {
+      width: 44px; height: 44px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+    }
+    .col-card.problem .icon-circle {
+      background: rgba(230, 70, 70, 0.15);
+      color: #E64646;
+    }
+    .col-card.solution .icon-circle {
+      background: rgba(0, 113, 206, 0.15);
+      color: var(--primary);
+    }
+    .col-card .card-header h3 {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--text-light);
+    }
+
+    .col-card p {
+      font-size: 17px;
+      line-height: 1.7;
+      color: var(--text-muted);
+      margin-bottom: 14px;
+    }
+    .col-card p strong {
+      color: var(--text-main);
+    }
+
+    .stat-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(255, 194, 32, 0.1);
+      border: 1px solid rgba(255, 194, 32, 0.3);
+      border-radius: 10px;
+      padding: 10px 18px;
+      margin-top: 8px;
+    }
+    .stat-badge .stat-value {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--accent);
+    }
+    .stat-badge .stat-label {
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    /* ── Pipeline Flow Diagram ── */
+    .pipeline-section {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+      z-index: 1;
+    }
+
+    .pipeline-flow {
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+      width: 100%;
+    }
+    .pipeline-step {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      position: relative;
+    }
+    .pipeline-step .step-box {
+      background: var(--bg-card);
+      border: 2px solid var(--border-subtle);
+      border-radius: 14px;
+      padding: 18px 14px 16px;
+      width: 100%;
+      transition: all 0.3s;
+      position: relative;
+    }
+    .pipeline-step .step-box:hover {
+      border-color: var(--primary);
+      box-shadow: var(--glow-primary);
+    }
+    .pipeline-step .step-num {
+      position: absolute;
+      top: -14px; left: 50%;
+      transform: translateX(-50%);
+      width: 28px; height: 28px;
+      background: var(--primary);
+      color: #FFF;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .pipeline-step .step-icon {
+      font-size: 28px;
+      color: var(--primary);
+      margin-bottom: 10px;
+      margin-top: 8px;
+    }
+    .pipeline-step .step-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-light);
+      margin-bottom: 6px;
+    }
+    .pipeline-step .step-desc {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+    .pipeline-arrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      min-width: 32px;
+      color: var(--accent);
+      font-size: 18px;
+    }
+
+    /* Post-OCR Extended Pipeline */
+    .post-pipeline {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      background: rgba(255, 194, 32, 0.05);
+      border: 1px solid rgba(255, 194, 32, 0.2);
+      border-radius: 12px;
+      padding: 16px 24px;
+    }
+    .post-pipeline .post-label {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      white-space: nowrap;
+    }
+    .post-pipeline .post-steps {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .post-pipeline .post-chip {
+      background: rgba(255, 194, 32, 0.1);
+      border: 1px solid rgba(255, 194, 32, 0.25);
+      border-radius: 8px;
+      padding: 6px 14px;
+      font-size: 13px;
+      color: var(--text-main);
+      white-space: nowrap;
+    }
+    .post-pipeline .post-chip i {
+      margin-right: 6px;
+      color: var(--accent);
+    }
+    .post-pipeline .post-arrow {
+      color: var(--accent);
+      font-size: 14px;
+    }
+
+    /* Hardware badges */
+    .hw-badges {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .hw-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(0, 113, 206, 0.08);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: 13px;
+      color: var(--text-main);
+    }
+    .hw-badge i {
+      color: var(--primary);
+    }
+
+    /* ── Tech Highlights Grid ── */
+    .tech-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      flex: 1;
+      z-index: 1;
+      align-content: start;
+    }
+    .tech-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 14px;
+      padding: 22px 24px;
+      transition: all 0.3s;
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+    }
+    .tech-card:hover {
+      border-color: var(--primary);
+      box-shadow: var(--glow-primary);
+      transform: translateY(-2px);
+    }
+    .tech-card .tc-icon {
+      width: 42px; height: 42px;
+      min-width: 42px;
+      background: rgba(0, 113, 206, 0.12);
+      border: 1px solid rgba(0, 113, 206, 0.25);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      color: var(--primary);
+      margin-top: 2px;
+    }
+    .tech-card .tc-content h4 {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-light);
+      margin-bottom: 6px;
+    }
+    .tech-card .tc-content p {
+      font-size: 13.5px;
+      line-height: 1.55;
+      color: var(--text-muted);
+      margin: 0;
+    }
+    .tech-card .tc-content p strong {
+      color: var(--text-main);
+      font-weight: 600;
+    }
+
+    /* ── Results & Roadmap ── */
+    .results-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 40px;
+      flex: 1;
+      z-index: 1;
+      align-items: start;
+    }
+
+    .results-col h3 {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text-light);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .results-col h3 i {
+      color: var(--primary);
+    }
+
+    .metric-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 18px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      margin-bottom: 10px;
+      transition: all 0.3s;
+    }
+    .metric-row:hover {
+      border-color: var(--primary);
+    }
+    .metric-row .metric-icon {
+      width: 36px; height: 36px;
+      min-width: 36px;
+      background: rgba(0, 113, 206, 0.12);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      color: var(--primary);
+    }
+    .metric-row .metric-text {
+      font-size: 14.5px;
+      color: var(--text-main);
+      line-height: 1.4;
+    }
+    .metric-row .metric-text .metric-value {
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    /* Roadmap timeline */
+    .roadmap-timeline {
+      position: relative;
+      padding-left: 28px;
+    }
+    .roadmap-timeline::before {
+      content: '';
+      position: absolute;
+      left: 8px; top: 4px; bottom: 4px;
+      width: 2px;
+      background: linear-gradient(to bottom, var(--primary), rgba(0, 113, 206, 0.2));
+      border-radius: 2px;
+    }
+    .roadmap-item {
+      position: relative;
+      margin-bottom: 18px;
+    }
+    .roadmap-item::before {
+      content: '';
+      position: absolute;
+      left: -24px; top: 6px;
+      width: 12px; height: 12px;
+      background: var(--bg-slide);
+      border: 2px solid var(--primary);
+      border-radius: 50%;
+    }
+    .roadmap-item.current::before {
+      background: var(--primary);
+      box-shadow: 0 0 10px rgba(0, 113, 206, 0.5);
+    }
+    .roadmap-item .rm-phase {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--primary);
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      margin-bottom: 4px;
+    }
+    .roadmap-item.current .rm-phase {
+      color: var(--accent);
+    }
+    .roadmap-item .rm-desc {
+      font-size: 14px;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    /* ── Navigation ── */
+    .slide-nav {
+      position: fixed;
+      bottom: 24px; left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      background: rgba(4, 30, 66, 0.92);
+      border: 1px solid rgba(0, 113, 206, 0.25);
+      backdrop-filter: blur(16px);
+      padding: 10px 28px;
+      border-radius: 40px;
+      z-index: 1000;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }
+    .nav-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 18px;
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 8px;
+      transition: all 0.2s;
+    }
+    .nav-btn:hover {
+      color: var(--accent);
+      background: rgba(255, 194, 32, 0.08);
+    }
+    .nav-btn:focus-visible {
+      outline: 2px solid var(--primary);
+      outline-offset: 2px;
+    }
+    .slide-counter {
+      color: var(--text-muted);
+      font-size: 14px;
+      min-width: 50px;
+      text-align: center;
+      font-weight: 600;
+      letter-spacing: 1px;
+    }
+    .nav-dots {
+      display: flex;
+      gap: 6px;
+    }
+    .nav-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.15);
+      border: none;
+      cursor: pointer;
+      transition: all 0.3s;
+      padding: 0;
+    }
+    .nav-dot.active {
+      background: var(--primary);
+      box-shadow: 0 0 8px rgba(0, 113, 206, 0.5);
+      width: 24px;
+      border-radius: 4px;
+    }
+
+    /* ── Progress Bar ── */
+    .progress-bar {
+      position: fixed;
+      top: 0; left: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      z-index: 1001;
+      transition: width 0.4s ease;
+      box-shadow: 0 0 12px rgba(0, 113, 206, 0.4);
+    }
+
+    /* ── Stagger Animation for child elements ── */
+    .slide.active .stagger { animation: fadeUp 0.5s ease both; }
+    .slide.active .stagger:nth-child(1) { animation-delay: 0.1s; }
+    .slide.active .stagger:nth-child(2) { animation-delay: 0.2s; }
+    .slide.active .stagger:nth-child(3) { animation-delay: 0.3s; }
+    .slide.active .stagger:nth-child(4) { animation-delay: 0.35s; }
+    .slide.active .stagger:nth-child(5) { animation-delay: 0.4s; }
+    .slide.active .stagger:nth-child(6) { animation-delay: 0.45s; }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(18px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Slide-specific stagger groups */
+    .slide.active .s-stagger { animation: fadeUp 0.5s ease both; }
+    .slide.active .s-stagger.d1 { animation-delay: 0.08s; }
+    .slide.active .s-stagger.d2 { animation-delay: 0.16s; }
+    .slide.active .s-stagger.d3 { animation-delay: 0.24s; }
+    .slide.active .s-stagger.d4 { animation-delay: 0.32s; }
+    .slide.active .s-stagger.d5 { animation-delay: 0.4s; }
+    .slide.active .s-stagger.d6 { animation-delay: 0.48s; }
+    .slide.active .s-stagger.d7 { animation-delay: 0.56s; }
+
+    /* ── Responsive ── */
+    @media (max-width: 1100px) {
+      .two-col, .results-grid, .tech-grid { grid-template-columns: 1fr; }
+      .pipeline-flow { flex-wrap: wrap; justify-content: center; }
+      .pipeline-arrow { transform: rotate(90deg); width: auto; min-width: auto; }
+      .slide { padding: 40px 30px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Progress Bar -->
+  <div class="progress-bar" id="progressBar" style="width: 20%"></div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- SLIDE 1: TITLE -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div class="slide title-slide active" role="region" aria-label="Title slide">
+    <div class="title-badge stagger">
+      <i class="fas fa-shield-halved"></i> Fully Local &bull; Zero Cloud &bull; macOS Native
+    </div>
+    <h1 class="stagger">LOCALOCR</h1>
+    <div class="subtitle stagger">Local Video-to-Text OCR Pipeline for macOS</div>
+    <div class="tagline stagger">100% offline. Zero cloud dependencies. Your data stays on your machine.</div>
+
+    <div class="icon-pipeline stagger">
+      <div class="pipe-step">
+        <div class="pipe-icon"><i class="fas fa-film"></i></div>
+        <div class="pipe-label">Video</div>
+      </div>
+      <div class="pipe-arrow"><i class="fas fa-chevron-right"></i></div>
+      <div class="pipe-step">
+        <div class="pipe-icon"><i class="fas fa-images"></i></div>
+        <div class="pipe-label">Frames</div>
+      </div>
+      <div class="pipe-arrow"><i class="fas fa-chevron-right"></i></div>
+      <div class="pipe-step">
+        <div class="pipe-icon"><i class="fas fa-font"></i></div>
+        <div class="pipe-label">OCR Text</div>
+      </div>
+      <div class="pipe-arrow"><i class="fas fa-chevron-right"></i></div>
+      <div class="pipe-step">
+        <div class="pipe-icon"><i class="fas fa-magnifying-glass"></i></div>
+        <div class="pipe-label">Match</div>
+      </div>
+      <div class="pipe-arrow"><i class="fas fa-chevron-right"></i></div>
+      <div class="pipe-step">
+        <div class="pipe-icon"><i class="fas fa-folder-tree"></i></div>
+        <div class="pipe-label">Organize</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- SLIDE 2: PROBLEM & SOLUTION -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div class="slide" role="region" aria-label="Problem and Solution">
+    <div class="slide-label s-stagger d1">Challenge &amp; Approach</div>
+    <h1 class="s-stagger d1">Why LOCALOCR?</h1>
+    <h2 class="s-stagger d2">Turning hours of video into <span class="hl">searchable, organized data</span> — without the cloud</h2>
+
+    <div class="two-col">
+      <div class="col-card problem s-stagger d3">
+        <div class="card-header">
+          <div class="icon-circle"><i class="fas fa-exclamation-triangle"></i></div>
+          <h3>The Problem</h3>
+        </div>
+        <p>
+          Users have <strong>hours of video content</strong> — financial news broadcasts, technical presentations, recorded lectures — containing critical screens buried in the footage.
+        </p>
+        <p>
+          Manually scrubbing through video to find specific frames is <strong>tedious, error-prone, and doesn't scale</strong>. Cloud-based solutions raise privacy and cost concerns.
+        </p>
+        <p>
+          Existing tools either require internet connectivity, lack multi-language support, or can't handle <strong>Indic scripts like Hindi/Devanagari</strong>.
+        </p>
+      </div>
+
+      <div class="col-card solution s-stagger d4">
+        <div class="card-header">
+          <div class="icon-circle"><i class="fas fa-check-circle"></i></div>
+          <h3>The Solution</h3>
+        </div>
+        <p>
+          LOCALOCR <strong>automatically extracts frames</strong> at configurable intervals, runs multi-engine OCR, matches keywords, and organizes everything into categorized folders.
+        </p>
+        <p>
+          Everything runs <strong>100% locally on your Mac</strong> — leveraging Apple Neural Engine, Metal Performance Shaders, and multi-core CPU parallelism.
+        </p>
+        <div class="stat-badge">
+          <i class="fas fa-bolt" style="color:var(--accent)"></i>
+          <span class="stat-value">~2-3 min</span>
+          <span class="stat-label">to process a 1-hour video (English fast mode)</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- SLIDE 3: ARCHITECTURE & PIPELINE -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div class="slide" role="region" aria-label="Architecture and Pipeline">
+    <div class="slide-label s-stagger d1">System Architecture</div>
+    <h1 class="s-stagger d1">Pipeline Overview</h1>
+
+    <div class="pipeline-section">
+      <!-- Main Pipeline Flow -->
+      <div class="pipeline-flow s-stagger d2">
+        <div class="pipeline-step">
+          <div class="step-box">
+            <div class="step-num">1</div>
+            <div class="step-icon"><i class="fas fa-film"></i></div>
+            <div class="step-title">Video Input</div>
+            <div class="step-desc">MP4, MKV, MOV<br>Any duration</div>
+          </div>
+        </div>
+        <div class="pipeline-arrow"><i class="fas fa-chevron-right"></i></div>
+
+        <div class="pipeline-step">
+          <div class="step-box">
+            <div class="step-num">2</div>
+            <div class="step-icon"><i class="fas fa-th"></i></div>
+            <div class="step-title">Frame Extraction</div>
+            <div class="step-desc">ffmpeg / ffprobe<br>Configurable intervals</div>
+          </div>
+        </div>
+        <div class="pipeline-arrow"><i class="fas fa-chevron-right"></i></div>
+
+        <div class="pipeline-step">
+          <div class="step-box">
+            <div class="step-num">3</div>
+            <div class="step-icon"><i class="fas fa-eye"></i></div>
+            <div class="step-title">Multi-Engine OCR</div>
+            <div class="step-desc">Apple Vision (EN)<br>EasyOCR (Hindi/Indic)<br>Composite (both)</div>
+          </div>
+        </div>
+        <div class="pipeline-arrow"><i class="fas fa-chevron-right"></i></div>
+
+        <div class="pipeline-step">
+          <div class="step-box">
+            <div class="step-num">4</div>
+            <div class="step-icon"><i class="fas fa-crosshairs"></i></div>
+            <div class="step-title">Keyword Matching</div>
+            <div class="step-desc">Contains / Exact<br>Regex patterns</div>
+          </div>
+        </div>
+        <div class="pipeline-arrow"><i class="fas fa-chevron-right"></i></div>
+
+        <div class="pipeline-step">
+          <div class="step-box">
+            <div class="step-num">5</div>
+            <div class="step-icon"><i class="fas fa-folder-tree"></i></div>
+            <div class="step-title">Smart Organization</div>
+            <div class="step-desc">Categorized folders<br>JSON metadata</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Post-OCR Pipeline -->
+      <div class="post-pipeline s-stagger d4">
+        <div class="post-label">Post-OCR Pipeline</div>
+        <div class="post-steps">
+          <div class="post-chip"><i class="fas fa-brain"></i> Ollama Vision Extraction</div>
+          <div class="post-arrow"><i class="fas fa-arrow-right"></i></div>
+          <div class="post-chip"><i class="fas fa-compress"></i> LLM Deduplication</div>
+          <div class="post-arrow"><i class="fas fa-arrow-right"></i></div>
+          <div class="post-chip"><i class="fas fa-chart-line"></i> Interactive Dashboard</div>
+        </div>
+      </div>
+
+      <!-- Hardware Badges -->
+      <div class="hw-badges s-stagger d5">
+        <div class="hw-badge"><i class="fas fa-microchip"></i> Apple Neural Engine (ANE)</div>
+        <div class="hw-badge"><i class="fas fa-bolt"></i> MPS GPU Acceleration</div>
+        <div class="hw-badge"><i class="fas fa-server"></i> Multi-Core CPU (ProcessPool)</div>
+        <div class="hw-badge"><i class="fas fa-layer-group"></i> ThreadPool for Composite</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- SLIDE 4: TECHNICAL HIGHLIGHTS -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div class="slide" role="region" aria-label="Key Technical Highlights">
+    <div class="slide-label s-stagger d1">Under the Hood</div>
+    <h1 class="s-stagger d1">Technical Highlights</h1>
+
+    <div class="tech-grid">
+      <div class="tech-card s-stagger d2">
+        <div class="tc-icon"><i class="fas fa-puzzle-piece"></i></div>
+        <div class="tc-content">
+          <h4>Pluggable OCR Engine System</h4>
+          <p>Abstract base class (<strong>OCREngine ABC</strong>) pattern. Apple Vision, EasyOCR, and Composite ship out of the box. Add a new engine by subclassing and registering in the factory.</p>
+        </div>
+      </div>
+
+      <div class="tech-card s-stagger d3">
+        <div class="tc-icon"><i class="fas fa-language"></i></div>
+        <div class="tc-content">
+          <h4>Script-Aware Deduplication</h4>
+          <p>Composite engine merges <strong>Latin text from Apple Vision</strong> + <strong>Devanagari from EasyOCR</strong> without duplicating numbers or English characters across engines.</p>
+        </div>
+      </div>
+
+      <div class="tech-card s-stagger d4">
+        <div class="tc-icon"><i class="fas fa-gears"></i></div>
+        <div class="tc-content">
+          <h4>Hardware-Aware Parallelism</h4>
+          <p>Apple Vision uses <strong>ProcessPoolExecutor</strong> with <strong>spawn</strong> context (bypasses GIL + PyObjC). EasyOCR uses a global lock. Composite runs both concurrently on different hardware.</p>
+        </div>
+      </div>
+
+      <div class="tech-card s-stagger d5">
+        <div class="tc-icon"><i class="fas fa-rotate"></i></div>
+        <div class="tc-content">
+          <h4>Two-Pass LLM Extraction</h4>
+          <p>Phase 1 extracts structured JSON stock picks from frames. Phase 2 <strong>retries null fields</strong> with partial context, filling gaps the first pass missed.</p>
+        </div>
+      </div>
+
+      <div class="tech-card s-stagger d6">
+        <div class="tc-icon"><i class="fas fa-hand"></i></div>
+        <div class="tc-content">
+          <h4>Graceful Interrupt Handling</h4>
+          <p>A <strong>threading.Event</strong> is checked before every Ollama API call. On Ctrl+C, partial Phase 1 data is always saved to disk — no work is lost.</p>
+        </div>
+      </div>
+
+      <div class="tech-card s-stagger d7">
+        <div class="tc-icon"><i class="fas fa-globe"></i></div>
+        <div class="tc-content">
+          <h4>Unicode-Safe Organization</h4>
+          <p><strong>NFC normalization</strong> preserves Devanagari matras and combining marks in folder names. Hindi keywords like <strong>&#2360;&#2375;&#2336;&#2368;/</strong> render correctly on disk.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- SLIDE 5: RESULTS & ROADMAP -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div class="slide" role="region" aria-label="Results and Roadmap">
+    <div class="slide-label s-stagger d1">Performance &amp; Vision</div>
+    <h1 class="s-stagger d1">Results & Roadmap</h1>
+
+    <div class="results-grid">
+      <!-- Current Capabilities -->
+      <div class="results-col s-stagger d2">
+        <h3><i class="fas fa-chart-bar"></i> Current Capabilities</h3>
+
+        <div class="metric-row">
+          <div class="metric-icon"><i class="fas fa-bolt"></i></div>
+          <div class="metric-text"><span class="metric-value">~27ms</span> per frame — English fast mode (Apple Vision)</div>
+        </div>
+        <div class="metric-row">
+          <div class="metric-icon"><i class="fas fa-language"></i></div>
+          <div class="metric-text"><span class="metric-value">~300ms</span> per frame — Hindi + English composite mode</div>
+        </div>
+        <div class="metric-row">
+          <div class="metric-icon"><i class="fas fa-globe"></i></div>
+          <div class="metric-text">Supports <span class="metric-value">80+ languages</span> via EasyOCR engine</div>
+        </div>
+        <div class="metric-row">
+          <div class="metric-icon"><i class="fas fa-table-cells"></i></div>
+          <div class="metric-text">Self-contained <span class="metric-value">HTML dashboard</span> with filtering, sorting, and upside% calc</div>
+        </div>
+        <div class="metric-row">
+          <div class="metric-icon"><i class="fas fa-file-code"></i></div>
+          <div class="metric-text">Full <span class="metric-value">JSON metadata</span> export for downstream integrations</div>
+        </div>
+      </div>
+
+      <!-- Roadmap -->
+      <div class="results-col s-stagger d3">
+        <h3><i class="fas fa-road"></i> Future Roadmap</h3>
+
+        <div class="roadmap-timeline">
+          <div class="roadmap-item current">
+            <div class="rm-phase">Phase 1 — Current</div>
+            <div class="rm-desc">CLI pipeline, multi-engine OCR, LLM post-processing, HTML dashboard</div>
+          </div>
+          <div class="roadmap-item">
+            <div class="rm-phase">Phase 2</div>
+            <div class="rm-desc">Native macOS GUI application, batch video processing, drag-and-drop workflow</div>
+          </div>
+          <div class="roadmap-item">
+            <div class="rm-phase">Phase 3</div>
+            <div class="rm-desc">Local LLM semantic classification, scene segmentation, duplicate frame removal</div>
+          </div>
+          <div class="roadmap-item">
+            <div class="rm-phase">Phase 4</div>
+            <div class="rm-desc">Search UI with timeline navigation, indexed OCR database, natural language querying</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- NAVIGATION -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div class="slide-nav" role="navigation" aria-label="Slide navigation">
+    <button class="nav-btn prev" aria-label="Previous slide"><i class="fas fa-chevron-left"></i></button>
+    <div class="nav-dots" id="navDots"></div>
+    <span class="slide-counter" aria-live="polite">1 / 5</span>
+    <button class="nav-btn next" aria-label="Next slide"><i class="fas fa-chevron-right"></i></button>
+    <button class="nav-btn fullscreen" aria-label="Toggle fullscreen"><i class="fas fa-expand"></i></button>
+  </div>
+
+  <script>
+    const slides = document.querySelectorAll('.slide');
+    const counter = document.querySelector('.slide-counter');
+    const dotsContainer = document.getElementById('navDots');
+    const progressBar = document.getElementById('progressBar');
+    let current = 0;
+    let transitioning = false;
+
+    // Build dots
+    slides.forEach((_, i) => {
+      const dot = document.createElement('button');
+      dot.className = 'nav-dot' + (i === 0 ? ' active' : '');
+      dot.setAttribute('aria-label', `Go to slide ${i + 1}`);
+      dot.addEventListener('click', () => showSlide(i));
+      dotsContainer.appendChild(dot);
+    });
+
+    function showSlide(n) {
+      if (transitioning || n === current) return;
+      // Normalise + clamp incoming index
+      n = ((n % slides.length) + slides.length) % slides.length;
+      if (n === current) return;
+
+      transitioning = true;
+      const direction = n > current ? 1 : -1;
+      const prev = slides[current];
+      const next = slides[n];
+
+      // 1. Snap the incoming slide to its off-screen starting position
+      //    with transitions disabled, then force a reflow so the snap commits.
+      next.style.transition = 'none';
+      next.style.transform = `translateX(${direction * 60}px)`;
+      next.style.opacity = '0';
+      void next.offsetWidth;
+
+      // 2. Animate the outgoing slide off in the opposite direction.
+      prev.classList.remove('active');
+      prev.style.transition = '';
+      prev.style.transform = `translateX(${-direction * 60}px)`;
+      prev.style.opacity = '0';
+
+      // 3. Re-enable transitions on the incoming slide, clear the inline
+      //    overrides so the `.active` class styles (translateX(0), opacity 1)
+      //    actually win, then add the class to trigger the animation.
+      next.style.transition = '';
+      next.style.transform = '';
+      next.style.opacity = '';
+      next.classList.add('active');
+
+      current = n;
+      counter.textContent = `${current + 1} / ${slides.length}`;
+      progressBar.style.width = `${((current + 1) / slides.length) * 100}%`;
+
+      document.querySelectorAll('.nav-dot').forEach((d, i) => {
+        d.classList.toggle('active', i === current);
+      });
+
+      setTimeout(() => {
+        transitioning = false;
+      }, 600);
+    }
+
+    document.querySelector('.prev').addEventListener('click', () => {
+      showSlide((current - 1 + slides.length) % slides.length);
+    });
+    document.querySelector('.next').addEventListener('click', () => {
+      showSlide((current + 1) % slides.length);
+    });
+    document.querySelector('.fullscreen').addEventListener('click', () => {
+      if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+      else document.exitFullscreen();
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === ' ') {
+        e.preventDefault();
+        showSlide((current + 1) % slides.length);
+      }
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        showSlide((current - 1 + slides.length) % slides.length);
+      }
+      if (e.key === 'Home') { e.preventDefault(); showSlide(0); }
+      if (e.key === 'End')  { e.preventDefault(); showSlide(slides.length - 1); }
+      if (e.key === 'f' || e.key === 'F') {
+        if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+        else document.exitFullscreen();
+      }
+    });
+  </script>
+</body>
+</html>
