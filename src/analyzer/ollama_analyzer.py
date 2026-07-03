@@ -115,6 +115,11 @@ def analyze_with_ollama(
         - model (str): Vision model name, e.g. "llava"
         - prompt (str): Prompt sent with each image
         - timeout_seconds (int): Per-request timeout, default 60
+        - include_context_in_vision_analysis (bool): When False (default),
+          any file whose name begins with ``ctx_`` (context-window frames
+          produced by context mode) is skipped. Set True to send both anchors
+          and context frames to Ollama at the cost of ~(1 + N_before + N_after)×
+          the request volume per anchor.
 
     Returns
     -------
@@ -128,6 +133,9 @@ def analyze_with_ollama(
         "numbers, names, and any financial or informational content shown.",
     )
     timeout = int(ollama_config.get("timeout_seconds", 60))
+    include_context = bool(
+        ollama_config.get("include_context_in_vision_analysis", False)
+    )
 
     matched_path = Path(matched_dir).resolve()
     metadata_dir = Path(output_dir).resolve() / "metadata"
@@ -142,12 +150,25 @@ def analyze_with_ollama(
     # Collect all image paths across all keyword sub-folders
     image_exts = {".png", ".jpg", ".jpeg"}
     images: list[tuple[str, Path]] = []  # (keyword_folder, image_path)
+    context_skipped = 0
     for keyword_dir in sorted(matched_path.iterdir()):
         if not keyword_dir.is_dir():
             continue
         for img in sorted(keyword_dir.iterdir()):
-            if img.suffix.lower() in image_exts:
-                images.append((keyword_dir.name, img))
+            if img.suffix.lower() not in image_exts:
+                continue
+            # Skip context-window frames (ctx_*) unless the caller opts in.
+            if not include_context and img.name.startswith("ctx_"):
+                context_skipped += 1
+                continue
+            images.append((keyword_dir.name, img))
+
+    if context_skipped:
+        logger.info(
+            "Skipping %d context-window frames (set "
+            "include_context_in_vision_analysis=true to include)",
+            context_skipped,
+        )
 
     if not images:
         logger.warning("No matched images found in %s", matched_path)

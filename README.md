@@ -7,6 +7,7 @@ A fully local, offline macOS pipeline that extracts frames from videos, runs OCR
 ## Features
 
 - **100% Local Processing** — no data leaves your machine
+- **Two Modes** — **accurate** (multi-language OCR incl. Hindi) or **context** (English-only OCR + ±N context window; skips slow Hindi OCR entirely)
 - **Multi-Engine OCR** — Apple Vision (English, CPU/ANE) + EasyOCR (Hindi/Indic, MPS GPU), auto-selected by language
 - **Parallel Processing** — 4 concurrent threads for English-only; Apple Vision and EasyOCR run simultaneously per frame in composite mode
 - **Hindi + English Support** — composite engine merges both engines with script-aware deduplication (Devanagari from EasyOCR, Latin from Apple Vision)
@@ -67,6 +68,60 @@ python main.py path/to/config.json --ocr-only --frames-dir /path/to/frames
 
 `--frames-dir` defaults to `<output_directory>/all_frames` from config if not specified.
 
+### Pipeline Modes
+
+LOCALOCR runs in one of two modes. Set with the `mode` key in config or override with `--mode` on the CLI.
+
+| Mode | OCR languages | Context expansion | When to use |
+|---|---|---|---|
+| **`accurate`** *(default)* | Whatever `languages` says (multi-language, incl. Hindi via EasyOCR) | Off | You want faithful text extraction from every frame and are willing to pay for Hindi OCR |
+| **`context`** | Forced to `["en"]` (overrides `languages`) | On — each match spawns a ±N frame window | You want speed: English-only OCR (Apple Vision) is much faster; surrounding frames capture Hindi content visually so downstream Ollama vision analysis can still read it |
+
+In `context` mode, `languages` and `ocr_engine` are ignored — the pipeline forces English-only Apple Vision. Only English keywords in `match_keywords` will ever match; Hindi keywords are dead in this mode.
+
+#### Context mode examples
+
+```bash
+# Context mode with default ±5 window (from config)
+python main.py --mode context
+
+# Context mode with symmetric ±3 window (overrides config)
+python main.py --mode context --context 3
+
+# Context mode with asymmetric window
+python main.py --mode context --context-before 2 --context-after 8
+
+# Context mode on already-extracted frames (fast iteration on window sizing)
+python main.py --ocr-only --mode context --context 5
+```
+
+CLI flags always override config values. If neither is set, defaults are `mode: accurate` and `context_mode: {frames_before: 5, frames_after: 5}`.
+
+#### Context-mode output
+
+Matched folder filenames carry the video basename as a prefix so screenshots from different videos in the same output tree stay distinguishable. Anchor frames (real OCR matches) keep the source frame name after the prefix; context frames additionally carry a `ctx_` marker at the very front:
+
+```
+matched/sethi/
+├── june22zeebiz_frame_0037_02m14s.png     ← anchor (OCR matched "Sethi")
+├── june22zeebiz_frame_0104_06m14s.png     ← anchor
+├── ctx_june22zeebiz_frame_0034_02m08s.png ← context (2 frames before anchor 37)
+├── ctx_june22zeebiz_frame_0035_02m10s.png
+├── ctx_june22zeebiz_frame_0036_02m12s.png
+├── ctx_june22zeebiz_frame_0038_02m16s.png ← context (2 frames after anchor 37)
+├── ctx_june22zeebiz_frame_0039_02m18s.png
+├── ctx_june22zeebiz_frame_0101_06m08s.png ← context around anchor 104
+├── ...
+```
+
+The prefix is the video filename minus extension (`june22zeebiz.mp4` → `june22zeebiz`). In `--ocr-only` mode with no `video_path`, the frames-directory name is used instead. Files inside `all_frames/` are NOT prefixed — they stay byte-identical to the source frame naming.
+
+Rules:
+- **Anchors keep their real source-frame name** (with prefix); context frames are prefixed with `ctx_`.
+- **Within a folder, anchors always win**: if a frame is an anchor for keyword `K`, it never appears as `ctx_` in `matched/K/`.
+- **Across folders, the same frame can appear as both**: e.g. an anchor for "Sethi" may show up as a `ctx_` neighbor of a nearby "Jain" anchor in `matched/jain/`.
+- **Overlapping windows are deduped**: a frame is copied at most once per keyword folder even if multiple anchors' windows overlap.
+
 ---
 
 ## Configuration
@@ -77,6 +132,11 @@ Edit `config/config.json`:
 {
   "video_path": "./input_videos/your_video.mp4",
   "frame_interval_seconds": 3,
+  "mode": "accurate",
+  "context_mode": {
+    "frames_before": 5,
+    "frames_after": 5
+  },
   "languages": ["en"],
   "ocr_engine": "auto",
   "ocr_config": {
@@ -89,7 +149,15 @@ Edit `config/config.json`:
   "match_keywords": ["dashboard", "login"],
   "match_mode": "contains",
   "output_directory": "./output",
-  "log_directory": "./logs"
+  "log_directory": "./logs",
+  "ollama_config": {
+    "enabled": false,
+    "url": "http://localhost:11434",
+    "model": "gemma4",
+    "prompt": "Analyze this screenshot...",
+    "timeout_seconds": 120,
+    "include_context_in_vision_analysis": false
+  }
 }
 ```
 
@@ -98,14 +166,17 @@ Edit `config/config.json`:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `video_path` | string | *required* | Path to the input video file (mp4, webm, etc.) |
+| `mode` | string | `"accurate"` | `"accurate"` (multi-lang OCR, no context expansion) or `"context"` (English-only OCR + ±N window). See [Pipeline Modes](#pipeline-modes) |
+| `context_mode` | dict | `{frames_before: 5, frames_after: 5}` | How many neighboring frames on each side of an anchor to copy as `ctx_*.png`. Only used when `mode == "context"` |
 | `frame_interval_seconds` | int | `2` | Seconds between frame captures |
-| `languages` | list | `["en"]` | OCR languages — see Engine Selection below |
-| `ocr_engine` | string | `"auto"` | `"auto"`, `"apple_vision"`, `"easyocr"`, or `"composite"` |
+| `languages` | list | `["en"]` | OCR languages — **ignored in `context` mode** (forced to `["en"]`) |
+| `ocr_engine` | string | `"auto"` | `"auto"`, `"apple_vision"`, `"easyocr"`, or `"composite"` — **ignored in `context` mode** |
 | `ocr_config` | dict | `{}` | Engine-specific options — see below |
-| `match_keywords` | list | *required* | Keywords to search for (supports Unicode/Hindi) |
+| `match_keywords` | list | *required* | Keywords to search for (supports Unicode/Hindi). Hindi keywords will never match in `context` mode |
 | `match_mode` | string | `"contains"` | `"contains"`, `"exact"`, or `"regex"` |
 | `output_directory` | string | `"./output"` | Where results are saved |
 | `log_directory` | string | `"./logs"` | Where log files are written |
+| `ollama_config` | dict | `{"enabled": false}` | Post-OCR vision analysis via Ollama. `include_context_in_vision_analysis` controls whether `ctx_*.png` frames are also sent to the vision model (default `false`) |
 
 ### `ocr_config` Options
 
@@ -143,12 +214,16 @@ output/
 │   └── ...
 ├── matched/             # Frames matching keywords
 │   ├── dashboard/
-│   │   └── frame_0001_00m00s.png
+│   │   ├── <video>_frame_0001_00m00s.png       # anchor (real OCR match)
+│   │   └── ctx_<video>_frame_0002_00m02s.png   # context (only in `context` mode)
 │   └── login/
-│       └── frame_0012_00m24s.png
+│       └── <video>_frame_0012_00m24s.png
 └── metadata/
-    └── ocr_results.json  # Full OCR + match data
+    └── ocr_results.json  # Full OCR + match data (including is_context flag)
 ```
+
+- **`<video>_frame_*.png`** — anchor frames (an actual OCR keyword match). Prefix is the source video basename (or the frames-dir name in `--ocr-only` mode).
+- **`ctx_<video>_frame_*.png`** — context frames (neighbors of an anchor, copied in `context` mode only). See [Pipeline Modes](#pipeline-modes).
 
 ### Metadata Format
 
@@ -158,9 +233,12 @@ output/
   "timestamp": "00m00s",
   "matched": true,
   "matched_keywords": ["dashboard"],
-  "ocr_text": "Welcome to Dashboard\nAnalytics Panel"
+  "ocr_text": "Welcome to Dashboard\nAnalytics Panel",
+  "is_context": false
 }
 ```
+
+Context entries additionally carry `context_for_keyword` and `anchor_frame_number` for provenance.
 
 ---
 
@@ -183,8 +261,10 @@ LOCALOCR/
 │   │   └── composite_engine.py  # Parallel multi-engine merge
 │   ├── matcher/
 │   │   └── text_matcher.py      # Keyword matching engine
+│   ├── context/
+│   │   └── context_expander.py  # ±N context-window expansion (context mode)
 │   ├── organizer/
-│   │   └── file_organizer.py    # File organization logic
+│   │   └── file_organizer.py    # File organization logic (anchors + ctx_ frames)
 │   └── pipeline/
 │       └── pipeline_runner.py   # Full pipeline + OCR-only orchestrator
 ├── input_videos/                # Place input videos here
@@ -199,11 +279,16 @@ LOCALOCR/
 
 | Mode | Parallelism | Approx. speed |
 |---|---|---|
-| English-only (`fast` + no LC) | 4 frames concurrently (Apple Vision threads) | ~27ms/frame |
-| English-only (`accurate` + LC) | 4 frames concurrently | ~160ms/frame |
-| Hindi+English composite | Apple Vision + EasyOCR per frame simultaneously | ~300ms/frame (GPU) |
+| **context** (English-only, Apple Vision `fast` + no LC) | 4+ frames concurrently | ~27ms/frame |
+| **accurate** English-only (`fast` + no LC) | 4 frames concurrently (Apple Vision threads) | ~27ms/frame |
+| **accurate** English-only (`accurate` + LC) | 4 frames concurrently | ~160ms/frame |
+| **accurate** Hindi+English composite | Apple Vision + EasyOCR per frame simultaneously | ~300ms/frame (GPU) |
 
-A 1-hour video at 3-second intervals (~1200 frames) in English-only fast mode processes in roughly 2–3 minutes.
+A 1-hour video at 3-second intervals (~1200 frames) in English-only fast mode processes in roughly 2–3 minutes. `context` mode has the same OCR cost as English-only `accurate` mode — the ±N expansion is a cheap file-copy step post-OCR.
+
+**When to pick which mode:**
+- `accurate` — you need faithful Hindi text extraction (search for Hindi keywords, index Hindi transcripts).
+- `context` — you're using downstream vision analysis (Ollama) and want to feed it a rolling window per anchor. Skips Hindi OCR entirely for a large speedup.
 
 ---
 

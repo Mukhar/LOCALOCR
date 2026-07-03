@@ -85,10 +85,21 @@ config file reference:
                                       e.g. ["FII", "Sethi", "Jain"]
 
   Optional keys:
+    mode                     string   "accurate" | "context"
+                                      default: "accurate"
+                                      - accurate: multi-language OCR (incl. Hindi),
+                                                  no context expansion
+                                      - context : English-only OCR (forced),
+                                                  each match spawns a ±N frame
+                                                  window copied as ctx_*.png
+    context_mode             object   {"frames_before": 5, "frames_after": 5}
+                                      how many neighbors on each side of an
+                                      anchor to copy in context mode
     frame_interval_seconds   int      Seconds between captured frames
                                       default: 2
     languages                list     OCR language codes
                                       e.g. ["en"] or ["hi", "en"]
+                                      IGNORED in context mode (forced to ["en"])
     ocr_engine               string   "auto" | "apple_vision" | "easyocr" | "composite"
                                       default: "auto"  (apple_vision for en-only, composite for others)
     match_mode               string   "contains" | "exact" | "regex"
@@ -117,8 +128,15 @@ examples:
   python main.py                                        run with default config
   python main.py ./config/config.json                   run with explicit config
   python main.py --input ./video.mp4 --output ./out     override input/output via args
+  python main.py --video-path ./video.mp4               same as --input (alias)
   python main.py --ocr-only                             skip extraction, OCR existing frames
   python main.py --ocr-only --frames-dir ./my_frames    OCR frames from a custom directory
+  python main.py --mode context                         English-only OCR + ±5 context window
+  python main.py --mode context --context 3             English-only OCR + ±3 context window
+  python main.py --mode context --context-before 2 --context-after 8
+                                                        asymmetric context window
+  python main.py --video-path ./video.mp4 --mode context --context 3
+                                                        run a specific video in context mode
 """
 
 
@@ -148,16 +166,51 @@ def main():
         help="Directory containing pre-extracted frames (default: <output_directory>/all_frames)",
     )
     parser.add_argument(
-        "--input",
+        "--input", "--video-path",
+        dest="input",
         metavar="VIDEO",
         default=None,
-        help="Path to input video file (overrides config video_path)",
+        help="Path to input video file (overrides config video_path). "
+             "Alias: --video-path.",
     )
     parser.add_argument(
         "--output",
         metavar="DIR",
         default=None,
         help="Base output directory (overrides config output_directory)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("accurate", "context"),
+        default=None,
+        help=(
+            "Pipeline mode: 'accurate' (default; multi-language OCR incl. Hindi, "
+            "no context expansion) or 'context' (English-only OCR + ±N context "
+            "window). Overrides config 'mode' when passed."
+        ),
+    )
+    parser.add_argument(
+        "--context-before",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Frames BEFORE each anchor to include as context (context mode only). "
+             "Overrides context_mode.frames_before.",
+    )
+    parser.add_argument(
+        "--context-after",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Frames AFTER each anchor to include as context (context mode only). "
+             "Overrides context_mode.frames_after.",
+    )
+    parser.add_argument(
+        "--context",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Shorthand for --context-before N --context-after N (context mode only).",
     )
     args = parser.parse_args()
 
@@ -176,6 +229,19 @@ def main():
         config["video_path"] = str(Path(args.input).resolve())
     if args.output:
         config["output_directory"] = str(Path(args.output).resolve())
+    if args.mode:
+        config["mode"] = args.mode
+
+    # Context-window overrides (only meaningful in context mode, but we apply
+    # them unconditionally so the config reflects what the user asked for).
+    ctx_cfg = config.setdefault("context_mode", {})
+    if args.context is not None:
+        ctx_cfg["frames_before"] = args.context
+        ctx_cfg["frames_after"] = args.context
+    if args.context_before is not None:
+        ctx_cfg["frames_before"] = args.context_before
+    if args.context_after is not None:
+        ctx_cfg["frames_after"] = args.context_after
 
     # Setup logging
     log_file = setup_logging(config.get("log_directory", "./logs"))
@@ -189,9 +255,12 @@ def main():
             summary = run_ocr_only_pipeline(config, frames_dir=args.frames_dir)
             print()
             print("OCR-only pipeline completed successfully!")
+            print(f"  Mode: {summary.get('mode', 'accurate')}")
             print(f"  Frames directory: {summary['frames_dir']}")
             print(f"  Total frames processed: {summary['total_frames']}")
             print(f"  Matched frames: {summary['matched_frames']}")
+            if summary.get("context_frames"):
+                print(f"  Context frames: {summary['context_frames']}")
             print(f"  Categories: {summary['categories']}")
             print(f"  Processing time: {summary['processing_time_seconds']}s")
             print(f"  Metadata: {summary['metadata_file']}")
@@ -199,8 +268,11 @@ def main():
             summary = run_pipeline(config)
             print()
             print("Pipeline completed successfully!")
+            print(f"  Mode: {summary.get('mode', 'accurate')}")
             print(f"  Total frames extracted: {summary['total_frames']}")
             print(f"  Matched frames: {summary['matched_frames']}")
+            if summary.get("context_frames"):
+                print(f"  Context frames: {summary['context_frames']}")
             print(f"  Categories: {summary['categories']}")
             print(f"  Processing time: {summary['processing_time_seconds']}s")
             print(f"  Metadata: {summary['metadata_file']}")

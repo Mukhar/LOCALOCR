@@ -1,8 +1,13 @@
 {
-  "video_path": "./input_videos/asset/low/june19zeebiz.mp4",
-  "frame_interval_seconds": 5,
+  "video_path": "./input_videos/asset/low/june22zeebiz.mp4",
+  "frame_interval_seconds": 6,
+  "mode": "context",
+  "context_mode": {
+    "frames_before": 5,
+    "frames_after": 5
+  },
   "languages": [
-    "en","hi"
+    "en"
   ],
   "ocr_engine": "auto",
   "ocr_config": {
@@ -15,8 +20,8 @@
   },
   "match_keywords": [
     "FII",
-    "Sethi",
-    "Jain",
+    "Vikas Sethi",
+    "Sandeep Jain",
     "संदीप जैन की राय",
     "सेठी",
     "सदाबहार"
@@ -25,10 +30,11 @@
   "output_directory": "./output",
   "log_directory": "./logs",
   "ollama_config": {
-    "enabled": true,
+    "enabled": false,
     "url": "http://localhost:11434",
     "model": "gemma4",
     "prompt": "Analyze this screenshot. Extract and describe all visible text, numbers, names, and any financial or informational content shown.",
-    "timeout_seconds": 60
+    "timeout_seconds": 120,
+    "include_context_in_vision_analysis": false
   }
 }

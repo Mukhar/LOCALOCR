@@ -16,7 +16,8 @@ main.py (CLI entry point)
     │       ├── src/ocr/easyocr_engine.py (multilingual OCR)
     │       └── src/ocr/composite_engine.py (multi-engine merge)
     ├── src/matcher/text_matcher.py (keyword matching)
-    └── src/organizer/file_organizer.py (file categorization)
+    ├── src/context/context_expander.py (±N context window — context mode only)
+    └── src/organizer/file_organizer.py (file categorization + ctx_ prefix)
 
 post_ocr_pipeline.py (standalone post-OCR pipeline)
 ├── Phase 1 — Vision Extraction (Ollama vision model → structured JSON picks)
@@ -25,6 +26,22 @@ post_ocr_pipeline.py (standalone post-OCR pipeline)
 
 src/analyzer/ollama_analyzer.py (lower-level Ollama vision helper)
 ```
+
+## Pipeline Modes
+
+The pipeline runs in one of two modes (config `mode` key or `--mode` CLI flag):
+
+- **`accurate`** (default): current behavior. Multi-language OCR (incl. Hindi via EasyOCR). No context expansion.
+- **`context`**: forces English-only OCR (`languages` and `ocr_engine` overridden). After matching, each anchor spawns a ±N frame window; neighbors are copied into the same `matched/<keyword>/` folder with a `ctx_` filename prefix. Configurable via `context_mode.frames_before` / `frames_after` (defaults 5 each). CLI overrides: `--context N`, `--context-before N`, `--context-after N`.
+
+Context-mode organization rules (enforced in `src/context/context_expander.py` + `src/organizer/file_organizer.py`):
+- Anchors keep their real source-frame name; context frames get the `ctx_` prefix.
+- **Source prefix**: matched-folder filenames are prepended with a source identifier (video basename minus extension, e.g. `june22zeebiz_frame_NNNN_...`; falls back to the frames-dir name when `video_path` is absent, e.g. in `--ocr-only` mode). Context files become `ctx_<prefix>_frame_...`. `all_frames/` is NOT prefixed.
+- **Anchors-win within a folder**: a frame that's an anchor for keyword K never appears as `ctx_` in `matched/K/`.
+- **Cross-keyword allowed**: same frame can be an anchor in one folder and `ctx_` in another.
+- **Overlap deduped**: per `(keyword, frame_number)`, at most one entry.
+
+`ollama_analyzer` skips `ctx_*.png` frames by default; set `ollama_config.include_context_in_vision_analysis: true` to include them.
 
 ## Key Conventions
 

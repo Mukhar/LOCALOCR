@@ -8,6 +8,8 @@ Also provides run_ocr_only_pipeline for running OCR on already-extracted
 frames without re-running video extraction.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -18,6 +20,7 @@ from typing import Optional
 from src.extractor import extract_frames, FrameExtractionError
 from src.ocr import run_ocr, OCRError
 from src.matcher import match_text
+from src.context import expand_context_windows
 from src.organizer import organize_frames
 from src.analyzer import analyze_with_ollama, OllamaAnalysisError
 
@@ -26,6 +29,65 @@ logger = logging.getLogger(__name__)
 
 class PipelineError(Exception):
     """Raised when the pipeline encounters a fatal error."""
+
+
+# ── Modes ────────────────────────────────────────────────────────────────────
+MODE_ACCURATE = "accurate"
+MODE_CONTEXT = "context"
+_VALID_MODES = {MODE_ACCURATE, MODE_CONTEXT}
+
+
+def _resolve_mode(config: dict) -> tuple[str, int, int]:
+    """
+    Return ``(mode, frames_before, frames_after)`` from config with validation.
+
+    - ``mode`` defaults to ``"accurate"`` (current behavior; no context expansion).
+    - In ``"context"`` mode, we force English-only OCR and apply a ±N window.
+    - ``context_mode.frames_before`` / ``frames_after`` default to 5 each.
+    """
+    mode = str(config.get("mode", MODE_ACCURATE)).lower()
+    if mode not in _VALID_MODES:
+        raise PipelineError(
+            f"Invalid mode {mode!r}. Must be one of: {sorted(_VALID_MODES)}"
+        )
+
+    ctx_cfg = config.get("context_mode") or {}
+    frames_before = int(ctx_cfg.get("frames_before", 5))
+    frames_after = int(ctx_cfg.get("frames_after", 5))
+    if frames_before < 0 or frames_after < 0:
+        raise PipelineError(
+            f"context_mode.frames_before/frames_after must be >= 0, got "
+            f"before={frames_before}, after={frames_after}"
+        )
+    return mode, frames_before, frames_after
+
+
+def _apply_mode_to_config(config: dict, mode: str) -> list[str]:
+    """
+    Apply mode-specific overrides to ``config`` in place and return the
+    effective OCR languages.
+
+    In ``"context"`` mode, ``languages`` is forced to ``["en"]`` regardless of
+    what the user configured — Hindi OCR is skipped entirely in this mode.
+    """
+    if mode == MODE_CONTEXT:
+        configured = config.get("languages") or ["en"]
+        if configured != ["en"]:
+            logger.info(
+                "Context mode: overriding languages=%s → ['en'] (English-only OCR)",
+                configured,
+            )
+        config["languages"] = ["en"]
+        # Force the auto-selector down the Apple Vision path even if the user
+        # hardcoded ocr_engine to composite or easyocr for accurate mode.
+        if config.get("ocr_engine") in ("composite", "easyocr"):
+            logger.info(
+                "Context mode: overriding ocr_engine=%r → 'apple_vision'",
+                config.get("ocr_engine"),
+            )
+            config["ocr_engine"] = "apple_vision"
+        return ["en"]
+    return config.get("languages", ["en"])
 
 
 def run_pipeline(config: dict) -> dict:
@@ -54,10 +116,12 @@ def run_pipeline(config: dict) -> dict:
         raise PipelineError("'video_path' is required in config")
 
     interval = config.get("frame_interval_seconds", 2)
-    languages = config.get("languages", ["en"])
     keywords = config.get("match_keywords", [])
     match_mode = config.get("match_mode", "contains")
     output_dir = config.get("output_directory", "./output")
+
+    mode, ctx_before, ctx_after = _resolve_mode(config)
+    languages = _apply_mode_to_config(config, mode)
 
     out_path = Path(output_dir).resolve()
     frames_dir = out_path / "all_frames"
@@ -71,6 +135,10 @@ def run_pipeline(config: dict) -> dict:
     logger.info("=" * 60)
     logger.info("Video: %s", video_path)
     logger.info("Interval: %d seconds", interval)
+    logger.info("Mode: %s", mode)
+    if mode == MODE_CONTEXT:
+        logger.info("Context window: -%d / +%d frames", ctx_before, ctx_after)
+    logger.info("Languages: %s", languages)
     logger.info("Keywords: %s", keywords)
     logger.info("Output: %s", output_dir)
     logger.info("-" * 60)
@@ -101,13 +169,25 @@ def run_pipeline(config: dict) -> dict:
     matched_results = match_text(ocr_results, keywords, match_mode)
     logger.info("[Step 3/4] Matching complete")
 
+    # Step 3b: Context Window Expansion (context mode only)
+    if mode == MODE_CONTEXT:
+        logger.info(
+            "[Step 3b] Expanding context windows (-%d/+%d)...",
+            ctx_before, ctx_after,
+        )
+        matched_results = expand_context_windows(
+            matched_results, ctx_before, ctx_after
+        )
+        logger.info("[Step 3b] Context expansion complete")
+
     # Step 4: File Organization
-    logger.info("[Step 4/5] Organizing files...")
-    org_summary = organize_frames(matched_results, output_dir)
+    source_prefix = Path(video_path).stem
+    logger.info("[Step 4/5] Organizing files (source_prefix=%r)...", source_prefix)
+    org_summary = organize_frames(matched_results, output_dir, source_prefix=source_prefix)
     logger.info("[Step 4/5] Organization complete")
 
     # Step 5: Ollama Vision Analysis (optional)
-    ollama_cfg = config.get("ollama_config", {})
+    ollama_cfg = dict(config.get("ollama_config", {}))
     ollama_summary = None
     if ollama_cfg.get("enabled", False):
         matched_dir = str(out_path / "matched")
@@ -131,9 +211,11 @@ def run_pipeline(config: dict) -> dict:
 
     summary = {
         "video_path": video_path,
+        "mode": mode,
         "total_frames": len(frames),
         "ocr_processed": len(ocr_results),
         "matched_frames": org_summary["matched_count"],
+        "context_frames": org_summary.get("context_count", 0),
         "unmatched_frames": org_summary["unmatched_count"],
         "categories": org_summary["categories"],
         "processing_time_seconds": round(elapsed, 2),
@@ -143,8 +225,11 @@ def run_pipeline(config: dict) -> dict:
 
     logger.info("=" * 60)
     logger.info("LOCALOCR Pipeline Complete")
+    logger.info("Mode: %s", mode)
     logger.info("Total frames: %d", summary["total_frames"])
     logger.info("Matched frames: %d", summary["matched_frames"])
+    if summary["context_frames"]:
+        logger.info("Context frames: %d", summary["context_frames"])
     logger.info("Categories: %s", summary["categories"])
     logger.info("Processing time: %.2f seconds", elapsed)
     logger.info("=" * 60)
@@ -183,8 +268,10 @@ def run_ocr_only_pipeline(config: dict, frames_dir: Optional[str] = None) -> dic
 
     keywords = config.get("match_keywords", [])
     match_mode = config.get("match_mode", "contains")
-    languages = config.get("languages", ["en"])
     output_dir = config.get("output_directory", "./output")
+
+    mode, ctx_before, ctx_after = _resolve_mode(config)
+    languages = _apply_mode_to_config(config, mode)
 
     # Resolve frames source directory
     if frames_dir:
@@ -236,6 +323,10 @@ def run_ocr_only_pipeline(config: dict, frames_dir: Optional[str] = None) -> dic
     logger.info("=" * 60)
     logger.info("Frames directory: %s", src_dir)
     logger.info("Frames found: %d", len(frames))
+    logger.info("Mode: %s", mode)
+    if mode == MODE_CONTEXT:
+        logger.info("Context window: -%d / +%d frames", ctx_before, ctx_after)
+    logger.info("Languages: %s", languages)
     logger.info("Keywords: %s", keywords)
     logger.info("Output: %s", output_dir)
     logger.info("-" * 60)
@@ -253,9 +344,24 @@ def run_ocr_only_pipeline(config: dict, frames_dir: Optional[str] = None) -> dic
     matched_results = match_text(ocr_results, keywords, match_mode)
     logger.info("[Step 2/3] Matching complete")
 
+    # Step 2b: Context Window Expansion (context mode only)
+    if mode == MODE_CONTEXT:
+        logger.info(
+            "[Step 2b] Expanding context windows (-%d/+%d)...",
+            ctx_before, ctx_after,
+        )
+        matched_results = expand_context_windows(
+            matched_results, ctx_before, ctx_after
+        )
+        logger.info("[Step 2b] Context expansion complete")
+
     # Step 3: File Organization
-    logger.info("[Step 3/4] Organizing files...")
-    org_summary = organize_frames(matched_results, output_dir)
+    # OCR-only mode has no video_path; fall back to the frames directory name
+    # so matched screenshots still carry a source identifier.
+    source_prefix = config.get("video_path")
+    source_prefix = Path(source_prefix).stem if source_prefix else src_dir.name
+    logger.info("[Step 3/4] Organizing files (source_prefix=%r)...", source_prefix)
+    org_summary = organize_frames(matched_results, output_dir, source_prefix=source_prefix)
     logger.info("[Step 3/4] Organization complete")
 
     # Step 4: Ollama Vision Analysis (optional)
@@ -284,9 +390,11 @@ def run_ocr_only_pipeline(config: dict, frames_dir: Optional[str] = None) -> dic
 
     summary = {
         "frames_dir": str(src_dir),
+        "mode": mode,
         "total_frames": len(frames),
         "ocr_processed": len(ocr_results),
         "matched_frames": org_summary["matched_count"],
+        "context_frames": org_summary.get("context_count", 0),
         "unmatched_frames": org_summary["unmatched_count"],
         "categories": org_summary["categories"],
         "processing_time_seconds": round(elapsed, 2),
@@ -296,8 +404,11 @@ def run_ocr_only_pipeline(config: dict, frames_dir: Optional[str] = None) -> dic
 
     logger.info("=" * 60)
     logger.info("LOCALOCR OCR-Only Pipeline Complete")
+    logger.info("Mode: %s", mode)
     logger.info("Total frames: %d", summary["total_frames"])
     logger.info("Matched frames: %d", summary["matched_frames"])
+    if summary["context_frames"]:
+        logger.info("Context frames: %d", summary["context_frames"])
     logger.info("Categories: %s", summary["categories"])
     logger.info("Processing time: %.2f seconds", elapsed)
     logger.info("=" * 60)
@@ -318,7 +429,11 @@ def _generate_metadata(results: list, metadata_dir: Path) -> Path:
             "matched": result.get("matched", False),
             "matched_keywords": result.get("matched_keywords", []),
             "ocr_text": result.get("ocr_text", ""),
+            "is_context": bool(result.get("is_context", False)),
         }
+        if entry["is_context"]:
+            entry["context_for_keyword"] = result.get("context_for_keyword")
+            entry["anchor_frame_number"] = result.get("anchor_frame_number")
         all_metadata.append(entry)
 
     output_file = metadata_dir / "ocr_results.json"
