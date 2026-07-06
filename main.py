@@ -6,6 +6,7 @@ Main entry point. Run with: python main.py [config_path]
 """
 
 import argparse
+from copy import deepcopy
 import json
 import logging
 import sys
@@ -15,6 +16,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.pipeline import run_pipeline, run_ocr_only_pipeline, PipelineError
+
+
+_SUPPORTED_VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v"}
 
 
 def setup_logging(log_dir: str = "./logs"):
@@ -76,10 +80,46 @@ def load_config(config_path: str, ocr_only: bool = False, input_override: str = 
     return config
 
 
+def _resolve_video_inputs(input_path: str) -> list[Path]:
+    """Return one video path, or supported videos directly inside a directory."""
+    path = Path(input_path).expanduser().resolve()
+
+    if not path.exists():
+        raise PipelineError(f"Input path not found: {path}")
+
+    if path.is_dir():
+        videos = sorted(
+            p for p in path.iterdir()
+            if p.is_file() and p.suffix.lower() in _SUPPORTED_VIDEO_EXTS
+        )
+        if not videos:
+            raise PipelineError(
+                f"No supported video files found in directory: {path}\n"
+                f"Supported extensions: {', '.join(sorted(_SUPPORTED_VIDEO_EXTS))}"
+            )
+        return videos
+
+    return [path]
+
+
+def _batch_output_dir(base_output: Path, video_path: Path, used_names: set[str]) -> Path:
+    """Return a deterministic per-video output directory under base_output."""
+    stem = video_path.stem.strip() or "video"
+    name = stem
+    counter = 2
+
+    while name in used_names:
+        name = f"{stem}_{counter}"
+        counter += 1
+
+    used_names.add(name)
+    return base_output / name
+
+
 _CONFIG_HELP = """
 config file reference:
   Required keys:
-    video_path               string   Path to the input video file
+        video_path               string   Path to the input video file or directory
                                       (not required when using --ocr-only)
     match_keywords           list     Keywords to search for in OCR text
                                       e.g. ["FII", "Sethi", "Jain"]
@@ -128,6 +168,8 @@ examples:
   python main.py                                        run with default config
   python main.py ./config/config.json                   run with explicit config
   python main.py --input ./video.mp4 --output ./out     override input/output via args
+    python main.py --input ./input_videos --output ./out  process every video in directory,
+                                                                                                                one by one, into ./out/<video>/
   python main.py --video-path ./video.mp4               same as --input (alias)
   python main.py --ocr-only                             skip extraction, OCR existing frames
   python main.py --ocr-only --frames-dir ./my_frames    OCR frames from a custom directory
@@ -265,17 +307,74 @@ def main():
             print(f"  Processing time: {summary['processing_time_seconds']}s")
             print(f"  Metadata: {summary['metadata_file']}")
         else:
-            summary = run_pipeline(config)
-            print()
-            print("Pipeline completed successfully!")
-            print(f"  Mode: {summary.get('mode', 'accurate')}")
-            print(f"  Total frames extracted: {summary['total_frames']}")
-            print(f"  Matched frames: {summary['matched_frames']}")
-            if summary.get("context_frames"):
-                print(f"  Context frames: {summary['context_frames']}")
-            print(f"  Categories: {summary['categories']}")
-            print(f"  Processing time: {summary['processing_time_seconds']}s")
-            print(f"  Metadata: {summary['metadata_file']}")
+            input_source = Path(config["video_path"]).expanduser().resolve()
+            videos = _resolve_video_inputs(config["video_path"])
+
+            if not input_source.is_dir():
+                config["video_path"] = str(videos[0])
+                summary = run_pipeline(config)
+                print()
+                print("Pipeline completed successfully!")
+                print(f"  Mode: {summary.get('mode', 'accurate')}")
+                print(f"  Total frames extracted: {summary['total_frames']}")
+                print(f"  Matched frames: {summary['matched_frames']}")
+                if summary.get("context_frames"):
+                    print(f"  Context frames: {summary['context_frames']}")
+                print(f"  Categories: {summary['categories']}")
+                print(f"  Processing time: {summary['processing_time_seconds']}s")
+                print(f"  Metadata: {summary['metadata_file']}")
+            else:
+                base_output = Path(config.get("output_directory", "./output")).expanduser().resolve()
+                used_output_names: set[str] = set()
+                summaries = []
+
+                print(f"Batch mode: found {len(videos)} video(s) in {input_source}")
+                print(f"Base output: {base_output}")
+
+                for index, video in enumerate(videos, 1):
+                    video_config = deepcopy(config)
+                    video_output = _batch_output_dir(base_output, video, used_output_names)
+                    video_config["video_path"] = str(video)
+                    video_config["output_directory"] = str(video_output)
+
+                    print()
+                    print(f"[{index}/{len(videos)}] Processing: {video.name}")
+                    print(f"  Output: {video_output}")
+
+                    try:
+                        summary = run_pipeline(video_config)
+                    except PipelineError as exc:
+                        raise PipelineError(
+                            f"Batch item {index}/{len(videos)} failed for {video.name}: {exc}"
+                        ) from exc
+
+                    summaries.append(summary)
+                    print(
+                        f"  Done: {summary['total_frames']} frames, "
+                        f"{summary['matched_frames']} matched, "
+                        f"{summary['processing_time_seconds']}s"
+                    )
+
+                total_frames = sum(s["total_frames"] for s in summaries)
+                total_matches = sum(s["matched_frames"] for s in summaries)
+                total_context = sum(s.get("context_frames", 0) for s in summaries)
+                total_seconds = round(sum(s["processing_time_seconds"] for s in summaries), 2)
+                categories: dict[str, int] = {}
+                for summary in summaries:
+                    for category, count in summary["categories"].items():
+                        categories[category] = categories.get(category, 0) + count
+
+                print()
+                print("Batch pipeline completed successfully!")
+                print(f"  Videos processed: {len(summaries)}")
+                print(f"  Mode: {summaries[0].get('mode', 'accurate') if summaries else config.get('mode', 'accurate')}")
+                print(f"  Total frames extracted: {total_frames}")
+                print(f"  Matched frames: {total_matches}")
+                if total_context:
+                    print(f"  Context frames: {total_context}")
+                print(f"  Categories: {categories}")
+                print(f"  Processing time: {total_seconds}s")
+                print(f"  Output root: {base_output}")
     except PipelineError as exc:
         logger.error("Pipeline failed: %s", exc)
         print(f"\nError: {exc}")
