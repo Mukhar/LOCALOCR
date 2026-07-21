@@ -124,8 +124,17 @@ def _format_timestamp(total_seconds: int) -> str:
     return f"{minutes:02d}m{seconds:02d}s"
 
 
-def _run_ffmpeg(cmd: list, video_label: str, timeout: int) -> None:
-    """Run ffmpeg and raise on failure."""
+def _run_ffmpeg(cmd: list, video_label: str, timeout: int, *, capture_stderr: bool = False):
+    """Run ffmpeg and raise on failure.
+
+    Parameters
+    ----------
+    capture_stderr
+        When True, return the (possibly-empty) stderr string on success.
+        Needed by scene/hybrid modes that parse ``showinfo`` output.
+        When False (default), returns ``None`` — preserves the pre-01-02
+        contract for the interval-mode caller.
+    """
     try:
         result = subprocess.run(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -143,6 +152,10 @@ def _run_ffmpeg(cmd: list, video_label: str, timeout: int) -> None:
             f"ffmpeg exited with code {result.returncode} for {video_label!r}.\n"
             f"stderr: {result.stderr.strip()}"
         )
+
+    if capture_stderr:
+        return result.stderr or ""
+    return None
 
 
 # Sequence-number regex for the ffmpeg tmp filenames (frame_NNNN.png).
