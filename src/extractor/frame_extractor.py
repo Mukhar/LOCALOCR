@@ -181,6 +181,47 @@ def _parse_showinfo_pts(stderr: str) -> list[float]:
     return sorted(float(m.group(1)) for m in _PTS_RE.finditer(stderr))
 
 
+def _debounce_timestamps(ts: list[float], min_gap: float) -> list[float]:
+    """Drop timestamps within ``min_gap`` seconds of the previously kept one.
+
+    Pure function — no filesystem interaction. Preserves the first element
+    unconditionally; each subsequent element is kept iff it is at least
+    ``min_gap`` seconds after the last-kept element. ``min_gap <= 0`` is a
+    no-op (returns a defensive copy).
+    """
+    if min_gap <= 0 or not ts:
+        return list(ts)
+    kept = [ts[0]]
+    for t in ts[1:]:
+        if t - kept[-1] >= min_gap:
+            kept.append(t)
+    return kept
+
+
+def _debounce_pairs(
+    pairs: list,
+    min_gap: float,
+) -> list:
+    """Debounce ``(Path, pts_seconds)`` pairs by PTS gap.
+
+    Sorts by PTS, then walks the sequence keeping the first pair and any
+    subsequent pair whose PTS is at least ``min_gap`` after the last-kept
+    PTS. Returns survivors in PTS order.
+
+    Pure function — caller is responsible for unlinking any files NOT in
+    the returned list. This keeps the helper testable without a temp dir
+    and lets scene/hybrid extractors own their tmp-cleanup policy.
+    """
+    if min_gap <= 0 or not pairs:
+        return list(pairs)
+    ordered = sorted(pairs, key=lambda fp: fp[1])
+    kept = [ordered[0]]
+    for f, t in ordered[1:]:
+        if t - kept[-1][1] >= min_gap:
+            kept.append((f, t))
+    return kept
+
+
 def _finalize_frames(
     tmp_dir: Path,
     out_path: Path,
