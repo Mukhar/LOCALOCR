@@ -385,7 +385,9 @@ def test_scene_mode_deletes_debounced_tmp_files(tmp_path, monkeypatch):
     for i in (1, 2, 3):
         (tmp_dir / f"frame_{i:04d}.png").write_bytes(b"\x89PNG")
 
-    # Mock _run_ffmpeg to be a no-op that returns a synthetic showinfo stderr.
+        # Mock run_subprocess (the shared helper) to be a no-op that returns a
+    # synthetic showinfo stderr. Patch the name in the extractor's namespace
+    # because that's where it was imported into (see PEP `where you patch`).
     fake_stderr = (
         "[Parsed_showinfo_1 @ 0x0] pts_time:0.000000\n"
         "[Parsed_showinfo_1 @ 0x0] pts_time:0.500000\n"
@@ -393,7 +395,7 @@ def test_scene_mode_deletes_debounced_tmp_files(tmp_path, monkeypatch):
     )
 
     with patch(
-        "src.extractor.frame_extractor._run_ffmpeg",
+        "src.extractor.frame_extractor.run_subprocess",
         return_value=fake_stderr,
     ):
         result = _extract_by_scene(

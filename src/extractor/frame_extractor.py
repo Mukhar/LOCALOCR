@@ -17,20 +17,18 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from src.common.subprocess_utils import (
+    BinaryNotFoundError,
+    SubprocessError,
+    require_binary,
+    run_subprocess,
+)
+
 logger = logging.getLogger(__name__)
 
 
 class FrameExtractionError(Exception):
     """Raised when frame extraction cannot be completed."""
-
-
-def _require_binary(name: str) -> str:
-    path = shutil.which(name)
-    if path is None:
-        raise FrameExtractionError(
-            f"{name!r} not found on PATH. Install it with: brew install ffmpeg"
-        )
-    return path
 
 
 def _probe_video(video_path: Path, ffprobe_bin: str) -> float:
@@ -124,38 +122,12 @@ def _format_timestamp(total_seconds: int) -> str:
     return f"{minutes:02d}m{seconds:02d}s"
 
 
-def _run_ffmpeg(cmd: list, video_label: str, timeout: int, *, capture_stderr: bool = False):
-    """Run ffmpeg and raise on failure.
-
-    Parameters
-    ----------
-    capture_stderr
-        When True, return the (possibly-empty) stderr string on success.
-        Needed by scene/hybrid modes that parse ``showinfo`` output.
-        When False (default), returns ``None`` — preserves the pre-01-02
-        contract for the interval-mode caller.
-    """
-    try:
-        result = subprocess.run(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            text=True, timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise FrameExtractionError(
-            f"ffmpeg timed out after {timeout}s processing {video_label!r}"
-        ) from exc
-    except OSError as exc:
-        raise FrameExtractionError(f"Failed to launch ffmpeg: {exc}") from exc
-
-    if result.returncode != 0:
-        raise FrameExtractionError(
-            f"ffmpeg exited with code {result.returncode} for {video_label!r}.\n"
-            f"stderr: {result.stderr.strip()}"
-        )
-
-    if capture_stderr:
-        return result.stderr or ""
-    return None
+# _run_ffmpeg + _require_binary previously lived here; migrated to
+# src.common.subprocess_utils in plan 02-01. Call sites now use
+# ``require_binary`` and ``run_subprocess`` directly; the top-level
+# :func:`extract_frames` translates :class:`BinaryNotFoundError` /
+# :class:`SubprocessError` into :class:`FrameExtractionError` at the
+# public boundary so external callers see one unchanged exception type.
 
 
 # Sequence-number regex for the ffmpeg tmp filenames (frame_NNNN.png).
@@ -325,7 +297,7 @@ def _extract_by_interval(
     )
 
     timeout = max(300, int(duration) * 3)
-    _run_ffmpeg(cmd, str(video), timeout)
+    run_subprocess(cmd, str(video), timeout)
 
     tmp_frames = sorted(tmp_dir.glob("frame_*.png"))
 
@@ -379,7 +351,7 @@ def _extract_by_scene(
         tmp_pattern,
     ]
     timeout = max(300, int(duration) * 3)
-    stderr = _run_ffmpeg(cmd, str(video), timeout, capture_stderr=True)
+    stderr = run_subprocess(cmd, str(video), timeout, capture_stderr=True)
 
     raw_ts = _parse_showinfo_pts(stderr or "")
     tmp_frames = sorted(tmp_dir.glob("frame_*.png"))
@@ -463,7 +435,7 @@ def _extract_by_hybrid(
         "-vsync", "vfr",
         str(scene_dir / "frame_%04d.png"),
     ]
-    scene_stderr = _run_ffmpeg(
+    scene_stderr = run_subprocess(
         scene_cmd, str(video),
         max(300, int(duration) * 3),
         capture_stderr=True,
@@ -481,7 +453,7 @@ def _extract_by_hybrid(
         "-vsync", "vfr",
         str(gap_dir / "frame_%04d.png"),
     ]
-    gap_stderr = _run_ffmpeg(
+    gap_stderr = run_subprocess(
         gap_cmd, str(video),
         max(300, int(duration) * 3),
         capture_stderr=True,
@@ -630,6 +602,27 @@ def extract_frames(
     interval_seconds: int = 2,
     cfg: dict | None = None,
 ) -> list:
+    """Public entry point. Wraps :func:`_extract_frames_impl` in a
+    boundary translator so that :class:`BinaryNotFoundError` and
+    :class:`SubprocessError` raised by the shared
+    ``src.common.subprocess_utils`` helpers surface as
+    :class:`FrameExtractionError` — preserving the pre-Phase-2 public
+    exception surface for every downstream caller.
+
+    See :func:`_extract_frames_impl` for the full docstring.
+    """
+    try:
+        return _extract_frames_impl(video_path, output_dir, interval_seconds, cfg)
+    except (BinaryNotFoundError, SubprocessError) as exc:
+        raise FrameExtractionError(str(exc)) from exc
+
+
+def _extract_frames_impl(
+    video_path: str,
+    output_dir: str,
+    interval_seconds: int = 2,
+    cfg: dict | None = None,
+) -> list:
     """
     Extract PNG frames from a video using the configured extraction mode.
 
@@ -660,8 +653,8 @@ def extract_frames(
         mode, str(video), interval_seconds, output_dir,
     )
 
-    ffmpeg_bin = _require_binary("ffmpeg")
-    ffprobe_bin = _require_binary("ffprobe")
+    ffmpeg_bin = require_binary("ffmpeg")
+    ffprobe_bin = require_binary("ffprobe")
 
     duration = _probe_video(video, ffprobe_bin)
     logger.debug("Video duration: %.2f s", duration)
