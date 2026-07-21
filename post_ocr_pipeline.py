@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import html
 import json
 import logging
 import sys
@@ -609,6 +610,17 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   .screenshot-link { display: block; margin-top: .7rem; font-size: .75rem; color: var(--accent);
     text-decoration: none; opacity: .7; transition: opacity .2s; }
   .screenshot-link:hover { opacity: 1; text-decoration: underline; }
+  /* Spoken-context (transcript) section */
+  .ctx { margin-top: .8rem; font-size: .82rem; }
+  .ctx summary { cursor: pointer; color: var(--muted); user-select: none;
+    padding: .3rem 0; outline: none; }
+  .ctx summary:hover { color: var(--text); }
+  .ctx-body { margin-top: .3rem; padding: .55rem .75rem; background: #0f151d;
+    border-radius: 6px; border: 1px solid var(--border); }
+  .ctx-body p { margin: .2rem 0; line-height: 1.35; color: var(--text); }
+  .ctx-label { color: var(--muted); font-weight: 600; margin-right: .3rem; }
+  .ctx-speaker { color: var(--muted); font-size: .75rem; margin-top: .35rem !important;
+    padding-top: .3rem; border-top: 1px dashed var(--border); }
 </style>
 </head>
 <body>
@@ -647,6 +659,18 @@ function gainPct(current, target) {
   return `<span class="value ${cls}">${pct >= 0 ? "+" : ""}${pct}%</span>`;
 }
 function card(p) {
+  const ctx = p.transcript_context;
+  const hasCtx = ctx && (ctx.before || ctx.at || ctx.after);
+  const ctxHTML = hasCtx ? `
+    <details class="ctx">
+      <summary> Spoken context (±8s)</summary>
+      <div class="ctx-body">
+        ${ctx.before ? `<p><span class="ctx-label">Before:</span> “${ctx.before}”</p>` : ""}
+        ${ctx.at     ? `<p><span class="ctx-label">At:</span> “${ctx.at}”</p>`         : ""}
+        ${ctx.after  ? `<p><span class="ctx-label">After:</span> “${ctx.after}”</p>`   : ""}
+        ${ctx.speaker ? `<p class="ctx-speaker">Speaker: ${ctx.speaker}</p>` : ""}
+      </div>
+    </details>` : "";
   return `<div class="card">
     <div class="card-header">
       <div>
@@ -660,7 +684,8 @@ function card(p) {
     <div class="row"><span class="label">Stop Loss</span>${numVal(p.stop_loss, "red")}</div>
     <div class="row"><span class="label">Target</span>${numVal(p.target, "yellow")}</div>
     <div class="row"><span class="label">Upside</span>${gainPct(p.current_price, p.target)}</div>
-    ${p._frame_path ? `<a class="screenshot-link" href="${p._frame_path}" target="_blank">📷 View screenshot</a>` : ""}
+    ${p._frame_path ? `<a class="screenshot-link" href="${p._frame_path}" target="_blank"> View screenshot</a>` : ""}
+    ${ctxHTML}
     <span class="ts">${TIMESTAMP}</span>
   </div>`;
 }
@@ -687,21 +712,52 @@ render();
 </html>"""
 
 
+def _escape_pick_strings(value: Any) -> Any:
+    """Recursively HTML-escape every string in a pick payload.
+
+    Numbers, bools, None and other non-string scalars pass through
+    unchanged so client-side numeric formatting still works. Escaping
+    is done SERVER-SIDE (fix for review finding W6) so the resulting
+    JSON, once dropped into a JS template literal via ``.innerHTML``,
+    renders LLM-derived text as inert text rather than executable HTML.
+
+    Trade-off: users can't have live '<' in analyst names, but they
+    also can't be XSS'd by a malicious/hallucinated ``</script>`` in
+    an analyst name. Correct call for a local viewer.
+    """
+    if isinstance(value, str):
+        return html.escape(value, quote=True)
+    if isinstance(value, dict):
+        return {k: _escape_pick_strings(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_escape_pick_strings(v) for v in value]
+    return value
+
+
 def _build_html(picks: list[dict], output_path: Path, timestamp: str) -> None:
     """
     Inject picks JSON into the HTML template and write viewer.html.
     Called from a background thread (Phase 3).
-    """
-    logger.info("Phase 3 [thread] — building HTML dashboard (%d picks)", len(picks))
 
-    picks_json = json.dumps(picks, ensure_ascii=False)
-    html = (_HTML_TEMPLATE
-            .replace("__PICKS_JSON__", picks_json)
-            .replace("__TIMESTAMP__", timestamp))
+    Every LLM-derived string in every pick is HTML-escaped BEFORE
+    serialization (fix W6). We also close the ``</script>``-in-JSON
+    breakout by replacing ``</`` with ``<\/`` in the emitted JSON,
+    which JavaScript parses identically but the HTML parser won't
+    treat as a script-close.
+    """
+    logger.info("Phase 3 [thread] -- building HTML dashboard (%d picks)", len(picks))
+
+    safe_picks = [_escape_pick_strings(p) for p in picks]
+    picks_json = json.dumps(safe_picks, ensure_ascii=False).replace("</", "<\\/")
+    safe_timestamp = html.escape(timestamp, quote=True)
+
+    html_out = (_HTML_TEMPLATE
+                .replace("__PICKS_JSON__", picks_json)
+                .replace("__TIMESTAMP__", safe_timestamp))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(html, encoding="utf-8")
-    logger.info("Phase 3 [thread] — viewer.html written → %s", output_path)
+    output_path.write_text(html_out, encoding="utf-8")
+    logger.info("Phase 3 [thread] -- viewer.html written -> %s", output_path)
 
 
 def phase3_html_async(
