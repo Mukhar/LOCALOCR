@@ -76,7 +76,7 @@ LOCALOCR/
 │   │   └── ollama_analyzer.py       # Low-level Ollama vision helper (ad-hoc use)
 │   ├── extractor/
 │   │   ├── __init__.py
-│   │   └── frame_extractor.py       # ffmpeg-based video → PNG frames
+│   │   └── frame_extractor.py       # ffmpeg-based video → PNG frames (strategy dispatch: interval / scene / hybrid)
 │   ├── ocr/
 │   │   ├── __init__.py
 │   │   ├── base_engine.py           # OCREngine ABC
@@ -125,10 +125,13 @@ sequenceDiagram
     participant FO as FileOrganizer
 
     CLI->>PR: run_pipeline(config)
-    PR->>FE: extract_frames(video_path, output_dir, interval)
+    PR->>FE: extract_frames(video_path, output_dir, interval, cfg=config)
+    FE->>FE: dispatch on cfg["extraction_mode"] (interval / scene / hybrid)
     FE->>FE: ffprobe → get duration
-    FE->>FE: ffmpeg → extract PNGs to .tmp_extract/
-    FE->>FE: rename to frame_NNNN_XXmYYs.png
+    FE->>FE: interval → ffmpeg fps=1/N
+    FE->>FE: scene   → ffmpeg select='gt(scene,T)',showinfo → parse PTS → debounce
+    FE->>FE: hybrid  → two passes (scene + fps=1/max_gap) merged via _debounce_pairs
+    FE->>FE: _finalize_frames — rename → frame_NNNN_XXmYYs.png
     FE-->>PR: list[{frame_path, frame_name, timestamp, frame_number}]
 
     PR->>OCR: run_ocr(frames, languages, config)
@@ -284,6 +287,22 @@ OCR progress: 40/150 frames processed
 ---
 
 ## 6. Frame Extraction Subsystem
+
+### 6.0 Extraction Modes (strategy dispatch)
+
+Since Phase 1 the extractor uses a strategy-dispatch pattern selected by
+the top-level config key `extraction_mode`. `extract_frames()` is a thin
+dispatcher over `_EXTRACTORS`:
+
+| Mode | Strategy fn | ffmpeg call(s) | Timestamp source |
+|---|---|---|---|
+| `interval` (default) | `_extract_by_interval` | one pass, `fps=1/N` | synthetic `(N-1)*interval` |
+| `scene` | `_extract_by_scene` | one pass, `select='gt(scene,threshold)',showinfo` | real PTS parsed from showinfo stderr |
+| `hybrid` | `_extract_by_hybrid` | two passes (scene + `fps=1/max_gap`) merged via `_debounce_pairs` | real PTS from both passes |
+
+Default is `interval` — pre-Phase-1 configs are byte-identical unaffected.
+See README “Frame Extraction Modes” for tuning and `benchmark_extraction.py`
+for a reproducible three-mode comparison harness.
 
 ### 6.1 Workflow
 

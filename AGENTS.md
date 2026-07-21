@@ -63,7 +63,7 @@ CLI entry point. Parses args, loads config, sets up logging, dispatches to pipel
 Orchestrates the 4-step pipeline: Extract → OCR → Match → Organize. Exposes `run_pipeline()` and `run_ocr_only_pipeline()`.
 
 ### `src/extractor/frame_extractor.py`
-Extracts PNG frames from video at configurable intervals using ffmpeg/ffprobe subprocess calls. Validates inputs, probes duration, handles temp files.
+Extracts PNG frames from video using ffmpeg/ffprobe subprocess calls. Since Phase 1 uses a **strategy-dispatch** pattern: `_EXTRACTORS = {"interval": _extract_by_interval, "scene": _extract_by_scene, "hybrid": _extract_by_hybrid}`. `extract_frames()` is a thin dispatcher — selects strategy from `cfg["extraction_mode"]` (default `"interval"`, byte-identical to pre-Phase-1). Shared helpers: `_finalize_frames` (rename + build result dicts), `_parse_showinfo_pts` (ffmpeg showinfo → sorted PTS list), `_debounce_timestamps` / `_debounce_pairs` (min-gap filtering). Validates inputs, probes duration, handles temp files.
 
 ### `src/ocr/`
 Pluggable OCR engine system:
@@ -126,7 +126,11 @@ Lower-level helper for sending individual matched frames to an Ollama vision mod
 | Key | Type | Description |
 |-----|------|-------------|
 | `video_path` | string | Path to input video file |
-| `frame_interval_seconds` | int | Seconds between frame captures (default: 2) |
+| `frame_interval_seconds` | int | Seconds between frame captures (default: 2). Used by `interval` mode and as the hybrid-mode fallback tick (`frame_interval_seconds` if `scene_config.max_gap_seconds` is absent) |
+| `extraction_mode` | string | `"interval"` (default), `"scene"`, or `"hybrid"`. See README “Frame Extraction Modes” |
+| `scene_config.threshold` | float | Scene-change score cutoff for ffmpeg's `select='gt(scene,T)'` filter. Range [0.0, 1.0], default 0.3. Required for `scene` and `hybrid` modes |
+| `scene_config.min_gap_seconds` | float | Debounce window — drop scene frames closer together than this. Default 1.0, must be ≥ 0 |
+| `scene_config.max_gap_seconds` | float | Hybrid-mode fallback tick — guarantees at least one sample every N seconds even if no scene change fires. Default 10.0, must be > 0. Ignored in `scene` mode |
 | `languages` | list[str] | OCR languages (e.g., `["en"]`, `["hi", "en"]`) |
 | `ocr_engine` | string | `"auto"`, `"apple_vision"` (macOS), `"windows_media_ocr"` (Windows), `"rapidocr"` (cross-platform), `"easyocr"`, `"composite"` |
 | `ocr_config` | object | Engine-specific settings (workers, GPU, confidence) |
