@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-current_phase: 01
-current_phase_name: scene-extraction
-status: verifying
-last_updated: "2026-07-21T07:31:31.517Z"
+current_phase: 02
+current_phase_name: transcript
+status: executing
+last_updated: "2026-07-21T19:45:00.000Z"
 last_activity: 2026-07-21
-last_activity_desc: Phase 01 execution started
+last_activity_desc: Phase 02 Plan 02-01 complete (DRY subprocess helpers + audio extractor)
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 12
-  completed_plans: 3
-  percent: 25
+  completed_plans: 4
+  percent: 33
 ---
 
 # Project State
@@ -23,11 +23,11 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-21)
 
 **Core value:** Every byte of processing stays on the user's Mac — no cloud, no API keys, no data leaving the device — while still producing publication-quality structured extractions from long-form video.
-**Current focus:** Phase 01 — scene-extraction
+**Current focus:** Phase 02 — transcript
 
 ## Current Position
 
-Phase: 01 (scene-extraction) — EXECUTING
+Phase: 02 (transcript) — EXECUTING
 Plan: 3 of 3
 Status: Phase complete — ready for verification
 Last activity: 2026-07-21 — Phase 01 execution started
