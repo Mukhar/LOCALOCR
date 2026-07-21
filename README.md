@@ -229,54 +229,122 @@ Edit `config/config.json`:
 
 ### Frame Extraction Modes
 
-Since Phase 1 the `frame_extractor` supports three extraction strategies
-selected via the top-level `extraction_mode` config key. Default is
-`"interval"` — existing configs keep working with byte-identical output.
+**TL;DR:** Frame extraction is **fully configurable**. The default is
+`interval` mode — the same behavior LOCALOCR has always had, so
+**existing configs keep working with byte-identical output**. Two new
+opt-in modes (`scene` and `hybrid`) let you skip redundant frames on
+visually-static content.
 
-| Mode | Behavior |
-|---|---|
-| `interval` (default) | Sample one frame every `frame_interval_seconds` — the pre-Phase-1 baseline |
-| `scene` | Extract only frames where ffmpeg detects a scene change above `threshold`; PTS-driven filenames |
-| `hybrid` | Two-pass merge — scene detection PLUS a `max_gap_seconds` fallback tick, debounced together |
+| Mode | Default? | Behavior |
+|---|---|---|
+| `interval` |  **yes (default)** | Sample one frame every `frame_interval_seconds` — pre-existing baseline. Nothing to configure |
+| `scene`    | opt-in            | Extract only frames where ffmpeg detects a scene change above `threshold`. PTS-driven filenames |
+| `hybrid`   | opt-in            | Two-pass merge — scene detection PLUS a `max_gap_seconds` fallback tick, debounced together. **Recommended for unknown content** |
 
-Config snippets:
+#### How to use
+
+**Option A — keep the default (do nothing).** If your `config/config.json`
+has no `extraction_mode` key, you get interval mode with the same
+behavior as before. No change required.
+
+**Option B — opt into a new mode** by adding two keys to your config:
 
 ```jsonc
 // scene mode
-"extraction_mode": "scene",
-"scene_config": { "threshold": 0.3, "min_gap_seconds": 1.0 }
+{
+  "video_path": "./input_videos/your_video.mp4",
+  "frame_interval_seconds": 2,
+  "extraction_mode": "scene",
+  "scene_config": {
+    "threshold": 0.3,
+    "min_gap_seconds": 1.0
+  },
+  // ...rest of your existing config unchanged
+}
 
-// hybrid mode (recommended default for unknown content)
-"extraction_mode": "hybrid",
-"scene_config": {
-  "threshold": 0.3,
-  "min_gap_seconds": 1.0,
-  "max_gap_seconds": 10.0
+// hybrid mode (best default for mixed / unknown content)
+{
+  "video_path": "./input_videos/your_video.mp4",
+  "frame_interval_seconds": 2,
+  "extraction_mode": "hybrid",
+  "scene_config": {
+    "threshold": 0.3,
+    "min_gap_seconds": 1.0,
+    "max_gap_seconds": 10.0
+  },
+  // ...rest of your existing config unchanged
 }
 ```
 
-Drop-in ready examples live at `config/config.scene.example.json` and
-`config/config.hybrid.example.json`.
+**Option C — start from a working example.** Drop-in ready configs live
+under `config/`:
+
+```bash
+# Try scene mode
+python main.py config/config.scene.example.json
+
+# Try hybrid mode
+python main.py config/config.hybrid.example.json
+```
+
+Edit `video_path` and `match_keywords` in either file to fit your inputs.
+
+#### All configurable knobs
+
+| Key | Type | Default | Used by | Meaning |
+|---|---|---|---|---|
+| `extraction_mode` | string | `"interval"` | all | `"interval"`, `"scene"`, or `"hybrid"` |
+| `frame_interval_seconds` | int | `2` | `interval` | Seconds between samples |
+| `scene_config.threshold` | float [0.0-1.0] | `0.3` | `scene`, `hybrid` | Scene-change score cutoff. Lower = more frames extracted |
+| `scene_config.min_gap_seconds` | float ≥ 0 | `1.0` | `scene`, `hybrid` | Debounce — drop scene frames closer together than this |
+| `scene_config.max_gap_seconds` | float > 0 | `10.0` | `hybrid` only | Fallback tick — guarantee at least one sample every N seconds even if no scene change fires. Ignored in `scene` mode |
+
+Invalid values (out-of-range `threshold`, negative gaps, non-dict
+`scene_config`) fail fast with a clear error **before** any ffmpeg call.
 
 #### When to use which
 
-| Content type | Recommended mode |
-|---|---|
-| Broadcast TV / screen recording | `scene` or `hybrid` |
-| Slow-changing / mostly static content | `hybrid` |
-| Unknown / mixed content | `hybrid` |
-| Legacy / need exact reproducibility vs pre-Phase-1 | `interval` |
+| Content type | Recommended mode | Why |
+|---|---|---|
+| Broadcast TV / screen recording | `scene` or `hybrid` | Big frame savings when nothing visual changes |
+| Slow-changing / mostly static content | `hybrid` | Guarantees periodic samples during long static shots |
+| Unknown / mixed content | `hybrid` | Best safety net — catches both scene changes AND ephemeral overlays |
+| Legacy / need exact reproducibility vs pre-Phase-1 | `interval` | Default. Byte-identical to old builds |
 
-Compare the three modes on your own video with the benchmark script:
+> **Note on scene mode alone:** on real broadcast content, ephemeral
+> text overlays (breaking-news lower-thirds, tickers) can appear and
+> disappear without triggering a scene-change threshold. If keyword
+> coverage matters, prefer **hybrid** — its `max_gap_seconds` tick
+> catches those overlays that pure scene detection would miss.
+
+#### Compare modes on your own video
 
 ```bash
 python benchmark_extraction.py --video ./input_videos/your_video.mp4
+
+# Full flag set:
+python benchmark_extraction.py \
+  --video ./input_videos/your_video.mp4 \
+  --interval 2 \
+  --threshold 0.3 \
+  --min-gap 1.0 \
+  --max-gap 10.0 \
+  --keywords "FII,BUY,SELL" \
+  --ocr-engine apple_vision
 ```
 
-It prints a markdown table of frame counts + wall time + unique matched
-keywords per mode, and exits **non-zero** if scene mode loses any keyword
-the interval baseline found. Useful as a pre-commit / CI gate when
-tuning `threshold` and `min_gap_seconds` for a particular corpus.
+Prints a markdown table of `(frames, extract_s, ocr_s, match_s, total_s,
+unique_matched_keywords)` per mode. Exit codes:
+
+| Exit | Meaning |
+|---|---|
+| `0` | All three modes ran AND scene mode kept every keyword interval mode found |
+| `1` | One of the runs crashed |
+| `2` | Scene mode lost ≥ 1 keyword the interval baseline found (missing set printed to stderr) |
+
+Useful as a **pre-commit / CI gate** when tuning `threshold` and
+`min_gap_seconds` for a particular corpus — non-zero exit stops the
+pipeline when a config regression drops keyword coverage.
 
 ---
 
