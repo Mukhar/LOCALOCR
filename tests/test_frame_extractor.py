@@ -24,8 +24,16 @@ import pytest
 from src.extractor import extract_frames
 from src.extractor.frame_extractor import (
     FrameExtractionError,
+    _debounce_pairs,
+    _debounce_timestamps,
+    _extract_by_scene,
     _finalize_frames,
+    _parse_showinfo_pts,
 )
+
+
+SHOWINFO_FIXTURE = Path("tests/fixtures/showinfo_stderr.txt")
+FRAME_EXTRACTOR_SRC = Path("src/extractor/frame_extractor.py")
 
 
 BASELINE_MANIFEST = Path("tests/fixtures/interval_baseline_manifest.json")
@@ -227,3 +235,316 @@ def test_invalid_extraction_mode_raises(tmp_path):
     msg = str(excinfo.value)
     assert "'bogus'" in msg
     assert "one of" in msg
+
+
+# ===========================================================================
+# Plan 01-02 additions: scene + hybrid extractors, PTS parsing, debounce,
+# fail-fast scene_config validation, and the BLOCKER-2 negative fences.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# _parse_showinfo_pts — pure regex helper
+# ---------------------------------------------------------------------------
+def test_parse_showinfo_pts_extracts_all_timestamps():
+    """Fixture stderr contains 4 showinfo lines + 2 unrelated noise lines.
+    Helper must pull only the 4 pts_time values, sorted ascending, as floats.
+    """
+    if not SHOWINFO_FIXTURE.exists():
+        pytest.skip(f"{SHOWINFO_FIXTURE} not found")
+    stderr = SHOWINFO_FIXTURE.read_text()
+    assert _parse_showinfo_pts(stderr) == [6.0, 18.0, 29.666667, 40.0]
+
+
+def test_parse_showinfo_pts_empty_stderr():
+    """Empty / no-match input returns [] without raising."""
+    assert _parse_showinfo_pts("") == []
+    assert _parse_showinfo_pts("nothing to see here, no pts_time in sight") == []
+
+
+# ---------------------------------------------------------------------------
+# _debounce_timestamps + _debounce_pairs — pure functions, no fs side effects
+# ---------------------------------------------------------------------------
+def test_debounce_drops_close_frames():
+    """1.0-second gap: 0.0 kept, 0.5 dropped, 1.5 kept, 1.7 dropped, 3.0 kept."""
+    assert _debounce_timestamps([0.0, 0.5, 1.5, 1.7, 3.0], 1.0) == [0.0, 1.5, 3.0]
+
+
+def test_debounce_min_gap_zero_is_noop():
+    """min_gap == 0 (and any negative) returns the input unchanged."""
+    ts = [0.0, 0.1, 0.2, 0.3]
+    assert _debounce_timestamps(ts, 0) == ts
+    assert _debounce_timestamps(ts, -1) == ts
+    # And still a defensive copy — mutating the return must not touch input.
+    out = _debounce_timestamps(ts, 0)
+    out.append(9.9)
+    assert ts == [0.0, 0.1, 0.2, 0.3]
+
+
+def test_debounce_pairs_returns_survivor_pairs():
+    """Debounce keeps the leading pair and any pair whose PTS is >= min_gap
+    after the last-kept PTS. Path('b') at 0.5 is the dropped survivor.
+    """
+    pairs = [
+        (Path("a"), 0.0),
+        (Path("b"), 0.5),
+        (Path("c"), 1.5),
+        (Path("d"), 3.0),
+    ]
+    assert _debounce_pairs(pairs, 1.0) == [
+        (Path("a"), 0.0),
+        (Path("c"), 1.5),
+        (Path("d"), 3.0),
+    ]
+
+
+def test_debounce_pairs_is_pure_no_filesystem_side_effects(tmp_path):
+    """Even with real Path objects that exist on disk, _debounce_pairs must
+    NOT unlink dropped files — caller does that (BLOCKER 3 responsibility).
+    """
+    files = []
+    for i, name in enumerate(["a.png", "b.png", "c.png", "d.png"]):
+        p = tmp_path / name
+        p.write_bytes(b"\x89PNG")
+        files.append(p)
+
+    pairs = [(files[0], 0.0), (files[1], 0.5), (files[2], 1.5), (files[3], 3.0)]
+    kept = _debounce_pairs(pairs, 1.0)
+
+    # b.png did not survive the debounce
+    assert {p.name for p, _ in kept} == {"a.png", "c.png", "d.png"}
+    # ...but all four files still exist on disk. Pure function.
+    for p in files:
+        assert p.exists(), f"{p.name} was unlinked by _debounce_pairs — must be caller's job"
+
+
+# ---------------------------------------------------------------------------
+# _extract_by_scene — mocked ffmpeg + real tmp dir
+# ---------------------------------------------------------------------------
+def _fake_binaries(monkeypatch):
+    """Patch shutil.which so extract_frames sees fake ffmpeg/ffprobe paths."""
+    monkeypatch.setattr(
+        "src.extractor.frame_extractor.shutil.which",
+        lambda name: f"/fake/bin/{name}" if name in ("ffmpeg", "ffprobe") else None,
+    )
+
+
+def test_scene_mode_ffmpeg_command_shape(tmp_path, monkeypatch):
+    """The ffmpeg command list assembled by _extract_by_scene must include
+    the ``select='gt(scene,T)',showinfo`` filter with the exact threshold.
+    """
+    _fake_binaries(monkeypatch)
+    fake_video = tmp_path / "in.mp4"
+    fake_video.write_bytes(b"")
+    out_dir = tmp_path / "out"
+
+    captured_cmds: list[list[str]] = []
+
+    def _side_effect(cmd, **kw):
+        captured_cmds.append(cmd)
+        binary = cmd[0]
+        if "ffprobe" in binary:
+            return MagicMock(returncode=0, stdout='{"streams":[{"duration":"30.0"}]}', stderr="")
+        # ffmpeg: fabricate 1 tmp frame + a showinfo stderr line.
+        tmp_extract = out_dir / ".tmp_extract"
+        tmp_extract.mkdir(parents=True, exist_ok=True)
+        (tmp_extract / "frame_0001.png").write_bytes(b"\x89PNG")
+        return MagicMock(
+            returncode=0,
+            stdout="",
+            stderr="[Parsed_showinfo_1 @ 0x0] n:0 pts_time:6.000000",
+        )
+
+    with patch("src.extractor.frame_extractor.subprocess.run", side_effect=_side_effect):
+        extract_frames(
+            str(fake_video), str(out_dir), 2,
+            cfg={"extraction_mode": "scene", "scene_config": {"threshold": 0.3}},
+        )
+
+    ffmpeg_cmds = [c for c in captured_cmds if "ffmpeg" in c[0]]
+    assert ffmpeg_cmds, "ffmpeg was never invoked in scene mode"
+    joined = " ".join(ffmpeg_cmds[0])
+    assert "select='gt(scene,0.3)',showinfo" in joined
+
+
+def test_scene_mode_deletes_debounced_tmp_files(tmp_path, monkeypatch):
+    """BLOCKER 3 semantic proof: files that lose the debounce must be
+    unlinked before _finalize_frames runs so it sees a tmp dir whose
+    contents match kept_ts 1:1.
+
+    We pre-arrange 3 tmp frames with PTS [0.0, 0.5, 2.0] and min_gap=1.0
+    so the middle one is the debounce loser. After _extract_by_scene
+    completes, exactly 2 output PNGs should exist and no leftover tmp
+    files should linger.
+    """
+    out_path = tmp_path / "out"
+    tmp_dir = tmp_path / "tmp"
+    out_path.mkdir()
+    tmp_dir.mkdir()
+
+    # Fabricate the 3 tmp frames that ffmpeg "would have" produced.
+    for i in (1, 2, 3):
+        (tmp_dir / f"frame_{i:04d}.png").write_bytes(b"\x89PNG")
+
+    # Mock _run_ffmpeg to be a no-op that returns a synthetic showinfo stderr.
+    fake_stderr = (
+        "[Parsed_showinfo_1 @ 0x0] pts_time:0.000000\n"
+        "[Parsed_showinfo_1 @ 0x0] pts_time:0.500000\n"
+        "[Parsed_showinfo_1 @ 0x0] pts_time:2.000000\n"
+    )
+
+    with patch(
+        "src.extractor.frame_extractor._run_ffmpeg",
+        return_value=fake_stderr,
+    ):
+        result = _extract_by_scene(
+            video=tmp_path / "in.mp4",
+            out_path=out_path,
+            tmp_dir=tmp_dir,
+            ffmpeg_bin="/fake/ffmpeg",
+            duration=10.0,
+            cfg={"scene_config": {"threshold": 0.3, "min_gap_seconds": 1.0}},
+        )
+
+    # Two frames should survive the 1.0-second debounce (0.0 and 2.0).
+    assert len(result) == 2, f"expected 2 survivors, got {result}"
+    output_files = sorted(p.name for p in out_path.glob("*.png"))
+    assert len(output_files) == 2, output_files
+    # ...and the debounced middle file (frame_0002.png) must NOT be lingering
+    # in tmp_dir either — finalize + our unlink both did their job.
+    assert list(tmp_dir.glob("frame_*.png")) == [], (
+        "debounce loser was not unlinked from tmp_dir"
+    )
+
+
+# ---------------------------------------------------------------------------
+# _extract_by_hybrid — semantic + negative BLOCKER 2 fences
+# ---------------------------------------------------------------------------
+def test_hybrid_mode_runs_two_ffmpeg_passes(tmp_path, monkeypatch):
+    """BLOCKER 2 semantic proof: hybrid MUST invoke ffmpeg exactly twice,
+    once with scene detection and once with fps=1/max_gap. NOT one single
+    invocation with an eq(mod(t, N), 0) filter.
+    """
+    _fake_binaries(monkeypatch)
+    fake_video = tmp_path / "in.mp4"
+    fake_video.write_bytes(b"")
+    out_dir = tmp_path / "out"
+
+    ffmpeg_cmds: list[list[str]] = []
+
+    def _subprocess_side_effect(cmd, **kw):
+        binary = cmd[0]
+        if "ffprobe" in binary:
+            return MagicMock(returncode=0, stdout='{"streams":[{"duration":"60.0"}]}', stderr="")
+        # ffmpeg branch. cmd is one of the two hybrid passes.
+        ffmpeg_cmds.append(cmd)
+        # Locate the tmp dir the extractor made (out_dir/.tmp_extract/_scene or _gap).
+        # The last positional arg is the output pattern; parent of that is the scoped subdir.
+        out_pattern = Path(cmd[-1])
+        subdir = out_pattern.parent
+        subdir.mkdir(parents=True, exist_ok=True)
+        # Emit exactly one fake frame + one showinfo line per call so
+        # counts match and no drift fallback kicks in.
+        (subdir / "frame_0001.png").write_bytes(b"\x89PNG")
+        pts = 5.0 if "_scene" in str(subdir) else 15.0
+        return MagicMock(
+            returncode=0,
+            stdout="",
+            stderr=f"[Parsed_showinfo_1 @ 0x0] pts_time:{pts:.6f}",
+        )
+
+    with patch(
+        "src.extractor.frame_extractor.subprocess.run",
+        side_effect=_subprocess_side_effect,
+    ):
+        extract_frames(
+            str(fake_video), str(out_dir), 2,
+            cfg={
+                "extraction_mode": "hybrid",
+                "scene_config": {"threshold": 0.3, "min_gap_seconds": 1.0, "max_gap_seconds": 10.0},
+            },
+        )
+
+    assert len(ffmpeg_cmds) == 2, f"expected 2 ffmpeg passes, got {len(ffmpeg_cmds)}"
+    pass1 = " ".join(ffmpeg_cmds[0])
+    pass2 = " ".join(ffmpeg_cmds[1])
+    assert "select='gt(scene," in pass1, f"scene pass missing scene filter: {pass1}"
+    assert "fps=1/" in pass2, f"gap pass missing fps=1/ filter: {pass2}"
+
+
+def test_hybrid_mode_does_not_use_eq_mod_filter(tmp_path, monkeypatch):
+    """BLOCKER 2 negative fence: NO ffmpeg command assembled during a hybrid
+    run may contain the broken modulo select filter.
+    """
+    _fake_binaries(monkeypatch)
+    fake_video = tmp_path / "in.mp4"
+    fake_video.write_bytes(b"")
+    out_dir = tmp_path / "out"
+
+    captured_ffmpeg_cmds: list[str] = []
+
+    def _subprocess_side_effect(cmd, **kw):
+        binary = cmd[0]
+        if "ffprobe" in binary:
+            return MagicMock(returncode=0, stdout='{"streams":[{"duration":"60.0"}]}', stderr="")
+        captured_ffmpeg_cmds.append(" ".join(cmd))
+        out_pattern = Path(cmd[-1])
+        subdir = out_pattern.parent
+        subdir.mkdir(parents=True, exist_ok=True)
+        (subdir / "frame_0001.png").write_bytes(b"\x89PNG")
+        return MagicMock(returncode=0, stdout="", stderr="[Parsed_showinfo_1 @ 0x0] pts_time:1.000000")
+
+    with patch("src.extractor.frame_extractor.subprocess.run", side_effect=_subprocess_side_effect):
+        extract_frames(
+            str(fake_video), str(out_dir), 2,
+            cfg={"extraction_mode": "hybrid", "scene_config": {"max_gap_seconds": 10.0}},
+        )
+
+    forbidden = "eq(mod(t,"
+    offenders = [c for c in captured_ffmpeg_cmds if forbidden in c]
+    assert not offenders, f"forbidden modulo filter appeared in: {offenders}"
+
+
+def test_frame_extractor_source_has_no_eq_mod_filter():
+    """Source-level regression fence for BLOCKER 2 — the broken filter must
+    not sneak back into frame_extractor.py via a future edit or copy-paste.
+    """
+    src = FRAME_EXTRACTOR_SRC.read_text()
+    forbidden = "eq(mod(t,"
+    assert forbidden not in src, (
+        f"forbidden filter substring {forbidden!r} was reintroduced into "
+        f"{FRAME_EXTRACTOR_SRC}. Hybrid mode must use two ffmpeg passes, "
+        f"not a single-pass modulo filter."
+    )
+
+
+# ---------------------------------------------------------------------------
+# _validate_extraction_config — scene_config fail-fast
+# ---------------------------------------------------------------------------
+def test_invalid_scene_threshold_raises(tmp_path):
+    """threshold > 1.0 must fail fast before any ffmpeg call."""
+    fake_video = tmp_path / "in.mp4"
+    fake_video.write_bytes(b"")
+
+    with pytest.raises(FrameExtractionError) as excinfo:
+        extract_frames(
+            str(fake_video), str(tmp_path / "out"), 2,
+            cfg={"extraction_mode": "scene", "scene_config": {"threshold": 2.0}},
+        )
+    msg = str(excinfo.value)
+    assert "threshold" in msg
+    assert "[0.0, 1.0]" in msg
+
+
+def test_invalid_scene_negative_gap_raises(tmp_path):
+    """min_gap_seconds < 0 must fail fast before any ffmpeg call."""
+    fake_video = tmp_path / "in.mp4"
+    fake_video.write_bytes(b"")
+
+    with pytest.raises(FrameExtractionError) as excinfo:
+        extract_frames(
+            str(fake_video), str(tmp_path / "out"), 2,
+            cfg={"extraction_mode": "scene", "scene_config": {"min_gap_seconds": -1}},
+        )
+    msg = str(excinfo.value)
+    assert "min_gap_seconds" in msg
+    assert ">= 0" in msg
