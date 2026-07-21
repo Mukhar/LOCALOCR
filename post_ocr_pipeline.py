@@ -87,7 +87,9 @@ DEDUP_PROMPT_TEMPLATE = (
     "1. Merge entries that refer to the same stock pick by the same analyst.\n"
     "2. When merging, prefer non-null values over null ones.\n"
     "3. Remove exact duplicates.\n"
-    "4. Return ONLY a valid JSON array of unique, fully merged picks — "
+    "4. PRESERVE any 'transcript_context' field verbatim from the input on the merged "
+    "record - do not summarize, rewrite, or drop it.\n"
+    "5. Return ONLY a valid JSON array of unique, fully merged picks - "
     "no markdown, no explanation.\n\n"
     "Input data:\n{data}"
 )
@@ -173,6 +175,81 @@ def _missing_fields(record: list | None) -> list[str]:
     return [f for f in REQUIRED_FIELDS if item.get(f) is None]
 
 
+def _build_transcript_addendum(ctx: dict | None) -> str:
+    """Build a natural-language prompt suffix from a transcript_context dict.
+
+    Returns "" when ctx is missing / empty / non-dict. The addendum is
+    deliberately formatted as short quoted snippets so the vision model
+    treats it as corroborating dialogue rather than commands to obey.
+    """
+    if not ctx or not isinstance(ctx, dict):
+        return ""
+    parts: list[str] = []
+    if ctx.get("before"):
+        parts.append(f'Before this moment: "{ctx["before"]}"')
+    if ctx.get("at"):
+        parts.append(f'At this moment: "{ctx["at"]}"')
+    if ctx.get("after"):
+        parts.append(f'After this moment: "{ctx["after"]}"')
+    if ctx.get("speaker"):
+        parts.append(f'Attributed to: {ctx["speaker"]}')
+    if not parts:
+        return ""
+    return "\n\nSpoken context (±8s around this frame):\n" + "\n".join(parts)
+
+
+def _load_transcript_contexts(ocr_results_path: Path) -> dict:
+    """Build a {frame_name: transcript_context} lookup from ocr_results.json.
+
+    Returns {} if the file is missing or malformed - post-OCR always
+    degrades gracefully to no-context mode.
+    """
+    if not ocr_results_path.is_file():
+        logger.info(
+            "No ocr_results.json at %s; post-OCR will run without transcript context",
+            ocr_results_path,
+        )
+        return {}
+    try:
+        with open(ocr_results_path, encoding="utf-8") as f:
+            entries = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Could not read %s (%s); running without transcript context",
+            ocr_results_path, exc,
+        )
+        return {}
+    lookup: dict = {}
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("frame")
+        ctx = entry.get("transcript_context")
+        if name and isinstance(ctx, dict):
+            lookup[name] = ctx
+    if lookup:
+        logger.info(
+            "Loaded transcript context for %d frames from %s",
+            len(lookup), ocr_results_path,
+        )
+    return lookup
+
+
+def _attach_transcript_context(analysis: Any, ctx: dict | None) -> Any:
+    """Attach transcript_context to each item in the analysis list (in-place).
+
+    No-op when ctx is empty or analysis isn't a list. Called AFTER
+    _apply_folder_analyst so folder-analyst override + transcript_context
+    both land on the final record.
+    """
+    if not ctx or not isinstance(analysis, list):
+        return analysis
+    for item in analysis:
+        if isinstance(item, dict):
+            item["transcript_context"] = ctx
+    return analysis
+
+
 def _apply_folder_analyst(analysis: Any, folder_name: str) -> Any:
     """Override analyst with folder name for list/dict analysis payloads."""
     if analysis is None:
@@ -221,18 +298,22 @@ def _extract_single(
     url: str,
     model: str,
     timeout: int,
+    transcript_context: dict | None = None,
 ) -> dict:
     """
     Two-pass extraction for one image.
 
-    Pass 1: initial extraction.
+    Pass 1: initial extraction. If ``transcript_context`` is provided,
+            the spoken-context addendum is appended to the vision prompt
+            so the model has corroborating dialogue.
     Pass 2: retry only if required fields are missing, feeding the partial
             result back to the model with the same image.
     """
     image_b64 = _encode_image(image_path)
+    prompt = EXTRACTION_PROMPT + _build_transcript_addendum(transcript_context)
 
     # Pass 1
-    raw1, err = _ollama_post(url, model, EXTRACTION_PROMPT, timeout, image_b64)
+    raw1, err = _ollama_post(url, model, prompt, timeout, image_b64)
     if err:
         logger.error("  [P1] %s/%s — %s", keyword, image_path.name, err)
         return _make_result(keyword, image_path, None, None, None, err, retried=False)
@@ -270,6 +351,7 @@ def _extract_single(
                 parsed = parsed2
 
     parsed = _apply_folder_analyst(parsed, keyword)
+    parsed = _attach_transcript_context(parsed, transcript_context)
 
     still_missing = _missing_fields(parsed if isinstance(parsed, list) else None)
     parse_error = perr
@@ -277,7 +359,8 @@ def _extract_single(
         parse_error = f"Null after retry: {', '.join(still_missing)}"
 
     return _make_result(keyword, image_path, raw1, raw2, parsed, None,
-                        parse_error=parse_error, retried=retried)
+                        parse_error=parse_error, retried=retried,
+                        transcript_context=transcript_context)
 
 
 def _make_result(
@@ -289,8 +372,9 @@ def _make_result(
     error: str | None,
     parse_error: str | None = None,
     retried: bool = False,
+    transcript_context: dict | None = None,
 ) -> dict:
-    return {
+    result = {
         "keyword": keyword,
         "frame_name": image_path.name,
         "frame_path": str(image_path),
@@ -301,6 +385,12 @@ def _make_result(
         "parse_error": parse_error,
         "error": error,
     }
+    if transcript_context:
+        # Persist context alongside the raw analysis so downstream code
+        # (dashboard, dedup fallback) can recover it even if the vision
+        # model dropped it from the analysis payload.
+        result["transcript_context"] = transcript_context
+    return result
 
 
 def phase1_extract(
@@ -308,10 +398,16 @@ def phase1_extract(
     url: str,
     model: str,
     timeout: int,
+    transcript_map: dict | None = None,
 ) -> list[dict]:
     """
     Phase 1: iterate all images in matched/ sub-folders and extract
     structured JSON picks via Ollama.
+
+    ``transcript_map`` -- optional ``{frame_name: transcript_context}``
+    dict from the main pipeline's ocr_results.json. When a frame has
+    context, it's appended to the vision prompt ("Spoken context (±8s):
+    ...") to help the model disambiguate ambiguous screens.
 
     Respects _stop_event for graceful interrupt.
     Returns list of result dicts (one per image).
@@ -321,16 +417,23 @@ def phase1_extract(
         logger.warning("Phase 1: no images found in %s", matched_dir)
         return []
 
-    logger.info("Phase 1 — extracting %d images with model '%s'", len(images), model)
+    transcript_map = transcript_map or {}
+    with_ctx = sum(1 for _, p in images if p.name in transcript_map)
+    logger.info(
+        "Phase 1 -- extracting %d images with model '%s' (%d with spoken context)",
+        len(images), model, with_ctx,
+    )
     results: list[dict] = []
 
     for idx, (keyword, img_path) in enumerate(images, 1):
         if _stop_event.is_set():
-            logger.warning("Phase 1 — interrupted at image %d/%d", idx, len(images))
+            logger.warning("Phase 1 -- interrupted at image %d/%d", idx, len(images))
             break
 
         logger.info("  [%d/%d] %s/%s", idx, len(images), keyword, img_path.name)
-        result = _extract_single(keyword, img_path, url, model, timeout)
+        ctx = transcript_map.get(img_path.name)
+        result = _extract_single(keyword, img_path, url, model, timeout,
+                                 transcript_context=ctx)
 
         # Log raw output at INFO so it's always visible
         if result["raw_response"]:
@@ -360,14 +463,21 @@ def _enrich_with_frame_paths(
     html_dir: Path,
 ) -> list[dict]:
     """
-    Attach ``_frame_path`` (relative to viewer.html's directory) to each
-    deduplicated pick by matching on ``stockPick`` against phase-1 results.
-    First matching frame wins; picks with no match are left unchanged.
+    Attach ``_frame_path`` (relative to viewer.html's directory) AND
+    ``transcript_context`` to each deduplicated pick by matching on
+    ``stockPick`` against phase-1 results. First matching frame wins;
+    picks with no match are left unchanged.
+
+    The transcript_context re-attachment is a belt-and-suspenders safety
+    net: even if the Ollama dedup pass drops the field (against instructions),
+    we recover it here from the phase-1 raw data indexed by stock name.
     """
     stock_to_frame: dict[str, str] = {}
+    stock_to_ctx: dict[str, dict] = {}
     for r in p1_results:
         fp = r.get("frame_path", "")
         analysis = r.get("analysis")
+        ctx = r.get("transcript_context")
         if not fp or not analysis:
             continue
         items = analysis if isinstance(analysis, list) else [analysis]
@@ -379,6 +489,10 @@ def _enrich_with_frame_paths(
                     stock_to_frame[stock] = str(rel)
                 except ValueError:
                     stock_to_frame[stock] = fp  # fallback to absolute
+                # Only record ctx on first-frame-wins so it lines up with
+                # the frame_path we chose above.
+                if ctx and isinstance(ctx, dict):
+                    stock_to_ctx[stock] = ctx
 
     enriched = []
     for pick in picks:
@@ -386,6 +500,10 @@ def _enrich_with_frame_paths(
         stock = (p.get("stockPick") or "").strip().lower()
         if stock in stock_to_frame:
             p["_frame_path"] = stock_to_frame[stock]
+        # Only fill in transcript_context when the dedup pass dropped it;
+        # never overwrite a context the model preserved verbatim.
+        if stock in stock_to_ctx and not p.get("transcript_context"):
+            p["transcript_context"] = stock_to_ctx[stock]
         enriched.append(p)
     return enriched
 
@@ -622,6 +740,7 @@ class PostOCRPipeline:
 
         self.phase1_json  = self.metadata_dir / "phase1_extractions.json"
         self.phase2_json  = self.metadata_dir / "phase2_deduplicated.json"
+        self.ocr_results_json = self.metadata_dir / "ocr_results.json"
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -647,11 +766,17 @@ class PostOCRPipeline:
         logger.info("PostOCRPipeline started — model: %s | url: %s", self.model, self.url)
         logger.info("=" * 65)
 
-        # ── Phase 1 ───────────────────────────────────────────────────────────
-        logger.info("─── Phase 1: Vision Extraction ─────────────────────────────")
+        # Load per-frame transcript context (if the main pipeline produced
+        # any). Missing/empty -> {} and the rest of the flow behaves
+        # identically to pre-Phase-2 (no addendum, no context section).
+        transcript_map = _load_transcript_contexts(self.ocr_results_json)
+
+        # ── Phase 1 ──────────────────────────────────────────────────────────────
+        logger.info("─── Phase 1: Vision Extraction ────────────────────────────────")
         try:
             p1_results = phase1_extract(
-                self.matched_dir, self.url, self.model, self.timeout
+                self.matched_dir, self.url, self.model, self.timeout,
+                transcript_map=transcript_map,
             )
         except KeyboardInterrupt:
             logger.warning("Phase 1 interrupted by user.")
