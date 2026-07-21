@@ -162,6 +162,24 @@ def _run_ffmpeg(cmd: list, video_label: str, timeout: int, *, capture_stderr: bo
 # Kept module-level so _finalize_frames doesn't recompile on every call.
 _SEQ_RE = re.compile(r"frame_(\d+)\.png$")
 
+# PTS-time regex for parsing ffmpeg's `showinfo` filter stderr. Matches only
+# the numeric field — e.g. from "... pts_time:29.666667 ..." captures
+# "29.666667". Kept module-level for the same recompilation reason.
+_PTS_RE = re.compile(r"pts_time:(\d+\.?\d*)")
+
+
+def _parse_showinfo_pts(stderr: str) -> list[float]:
+    """Extract PTS timestamps (seconds) from ffmpeg ``showinfo`` stderr.
+
+    ffmpeg emits one ``[Parsed_showinfo_N @ ...] ... pts_time:X.XXXXXX ...``
+    line per selected frame. We pluck the ``pts_time`` value out of each and
+    return them sorted ascending. Unrelated stderr lines (codec warnings,
+    stream headers) are ignored by the regex.
+
+    Empty / no-match input returns ``[]``.
+    """
+    return sorted(float(m.group(1)) for m in _PTS_RE.finditer(stderr))
+
 
 def _finalize_frames(
     tmp_dir: Path,

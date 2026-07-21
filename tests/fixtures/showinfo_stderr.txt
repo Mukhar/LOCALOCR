@@ -1,0 +1,6 @@
+[Parsed_showinfo_1 @ 0x1234abcd] n:   0 pts:   180 pts_time:6.000000 duration_time:0.040000 pos:12345 fmt:yuv420p sar:1/1 s:1920x1080
+[Parsed_showinfo_1 @ 0x1234abcd] n:   1 pts:   540 pts_time:18.000000 duration_time:0.040000 pos:67890 fmt:yuv420p sar:1/1 s:1920x1080
+[Parsed_showinfo_1 @ 0x1234abcd] n:   2 pts:   890 pts_time:29.666667 duration_time:0.040000 pos:99999 fmt:yuv420p sar:1/1 s:1920x1080
+[libx264 @ 0x2233] frame= 3 fps=25 q=28.0 size=8kB — some unrelated codec warning line
+Stream #0:0(und): Video: h264 (High), yuv420p, 1920x1080, 24.00 fps, 24 tbr — irrelevant
+[Parsed_showinfo_1 @ 0x1234abcd] n:   3 pts:  1200 pts_time:40.000000 duration_time:0.040000 pos:110022 fmt:yuv420p sar:1/1 s:1920x1080
