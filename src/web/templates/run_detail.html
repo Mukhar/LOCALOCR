@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Run #{{ run.id }} - LOCALOCR{% endblock %}
+
+{% block content %}
+<header class="mb-6">
+  <div class="flex items-center gap-3 mb-2">
+    <h1 class="text-3xl font-bold m-0">Run #{{ run.id }}</h1>
+    <span class="badge badge-{{ run.status }}">{{ run.status }}</span>
+  </div>
+  <p class="m-0" style="color: var(--text-muted);">
+    <span class="font-mono text-xs">{{ run.started_at }}</span>
+    {% if run.finished_at %}
+    &rarr; <span class="font-mono text-xs">{{ run.finished_at }}</span>
+    {% endif %}
+    &middot; mode: <code>{{ run.mode }}</code>
+    {% if run.total_frames is not none %}
+    &middot; {{ run.total_frames }} frames
+    {% endif %}
+    {% if run.matched_count is not none %}
+    &middot; {{ run.matched_count }} matched
+    {% endif %}
+  </p>
+</header>
+
+<!-- Live progress panel: SSE stream lands in plan 03-04.
+     For now render a static placeholder that hides itself once the
+     run has finished, so completed-run detail pages don't show
+     empty progress noise. -->
+{% if run.status == 'running' %}
+<section id="progress" class="rounded-lg border p-4 mb-6"
+         style="background: var(--surface); border-color: var(--border);">
+  <h2 class="text-lg font-semibold m-0 mb-3">Live progress</h2>
+  <p id="progress-body" class="m-0 text-sm" style="color: var(--text-muted);">
+    Waiting for the first event...
+    (SSE stream wires up in plan 03-04; refresh the page to see the current state.)
+  </p>
+</section>
+{% endif %}
+
+<!-- Video player: source served by /videos/{name}. Byte-range enabled
+     via FastAPI FileResponse. Click-to-seek handler lands in plan 03-04. -->
+{% if run.video_path %}
+{% set video_name = run.video_path.split('/')[-1] %}
+<section class="rounded-lg border p-4 mb-6"
+         style="background: var(--surface); border-color: var(--border);">
+  <h2 class="text-lg font-semibold m-0 mb-3">Video</h2>
+  <video id="run-video" controls preload="metadata" class="w-full max-h-96 rounded">
+    <source src="/videos/{{ video_name }}" type="video/mp4">
+    Your browser does not support embedded video.
+  </video>
+</section>
+{% endif %}
+
+<!-- Stock picks grid -->
+<section>
+  <h2 class="text-2xl font-bold mb-4">Picks ({{ picks|length }})</h2>
+  {% if picks %}
+  <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+    {% for pick in picks %}
+      {% include '_pick_card.html' %}
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="rounded-lg border p-6 m-0"
+     style="background: var(--surface); border-color: var(--border); color: var(--text-muted);">
+    No picks extracted yet. If the run is still running, they'll appear as they land.
+    If the run finished with zero picks, either no keywords matched or the LLM
+    extraction produced no results.
+  </p>
+  {% endif %}
+</section>
+{% endblock %}

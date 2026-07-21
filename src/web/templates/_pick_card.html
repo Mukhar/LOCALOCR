@@ -1,0 +1,71 @@
+{# _pick_card.html
+   Reusable partial for one stock-pick card.
+   ALL fields render through Jinja2's default autoescape (no `|safe`).
+   The seek plumbing (data-seek attribute + click handler) lands in
+   plan 03-04; this template already carries the attribute so the JS
+   drop-in is a one-liner. #}
+
+<article class="rounded-lg p-4 border"
+         style="background: var(--surface); border-color: var(--border);"
+         data-pick-id="{{ pick.id }}"
+         {% if pick.frame_timestamp_seconds is not none %}
+         data-seek="{{ pick.frame_timestamp_seconds }}"
+         {% endif %}>
+  <header class="flex items-start justify-between gap-3 mb-3">
+    <div>
+      <h3 class="text-lg font-bold m-0" style="color: var(--wm-spark-100);">
+        {{ pick.stock_pick }}
+      </h3>
+      {% if pick.analyst %}
+      <p class="text-sm mt-1 mb-0" style="color: var(--text-muted);">
+        by {{ pick.analyst }}
+      </p>
+      {% endif %}
+    </div>
+    {% if pick.frame_timestamp_seconds is not none %}
+    <button type="button"
+            class="btn btn-secondary text-xs"
+            data-seek-btn="{{ pick.frame_timestamp_seconds }}"
+            aria-label="Seek video to {{ pick.frame_timestamp_seconds }} seconds">
+      Seek {{ '%.0f'|format(pick.frame_timestamp_seconds) }}s
+    </button>
+    {% endif %}
+  </header>
+
+  <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm mb-3">
+    {% if pick.current_price %}
+    <dt style="color: var(--text-muted);">Current</dt>
+    <dd class="m-0 font-mono">{{ pick.current_price }}</dd>
+    {% endif %}
+    {% if pick.target %}
+    <dt style="color: var(--text-muted);">Target</dt>
+    <dd class="m-0 font-mono" style="color: var(--wm-spark-100);">{{ pick.target }}</dd>
+    {% endif %}
+    {% if pick.stop_loss %}
+    <dt style="color: var(--text-muted);">Stop Loss</dt>
+    <dd class="m-0 font-mono" style="color: var(--wm-red-100);">{{ pick.stop_loss }}</dd>
+    {% endif %}
+  </dl>
+
+  {% if pick.frame_path %}
+  <a href="/{{ pick.frame_path }}" target="_blank" rel="noopener"
+     class="text-xs" style="color: var(--wm-blue-100);">
+    View frame
+  </a>
+  {% endif %}
+
+  {% if pick.transcript_context %}
+    {% set ctx = pick.transcript_context | from_json %}
+    {% if ctx and (ctx.before or ctx.at or ctx.after) %}
+    <details class="mt-3 text-sm">
+      <summary style="color: var(--text-muted); cursor: pointer;">Spoken context (+/-8s)</summary>
+      <div class="mt-2 p-3 rounded" style="background: var(--surface-2);">
+        {% if ctx.before %}<p class="m-0"><span style="color: var(--text-muted);">Before:</span> &ldquo;{{ ctx.before }}&rdquo;</p>{% endif %}
+        {% if ctx.at     %}<p class="m-0 mt-1"><span style="color: var(--text-muted);">At:</span> &ldquo;{{ ctx.at }}&rdquo;</p>{% endif %}
+        {% if ctx.after  %}<p class="m-0 mt-1"><span style="color: var(--text-muted);">After:</span> &ldquo;{{ ctx.after }}&rdquo;</p>{% endif %}
+        {% if ctx.speaker %}<p class="m-0 mt-2 pt-2 text-xs" style="color: var(--text-muted); border-top: 1px dashed var(--border);">Speaker: {{ ctx.speaker }}</p>{% endif %}
+      </div>
+    </details>
+    {% endif %}
+  {% endif %}
+</article>

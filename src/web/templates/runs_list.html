@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Runs - LOCALOCR{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-3xl font-bold m-0">Runs</h1>
+  <a href="/runs/new" class="btn btn-primary">New Run</a>
+</div>
+
+{% if runs %}
+<div class="overflow-x-auto rounded-lg border"
+     style="background: var(--surface); border-color: var(--border);">
+  <table class="w-full text-sm" style="color: var(--text);">
+    <caption class="sr-only">List of past pipeline runs</caption>
+    <thead style="background: var(--surface-2); color: var(--text-muted);">
+      <tr>
+        <th scope="col" class="text-left px-4 py-3">Started</th>
+        <th scope="col" class="text-left px-4 py-3">Video</th>
+        <th scope="col" class="text-left px-4 py-3">Mode</th>
+        <th scope="col" class="text-right px-4 py-3">Frames</th>
+        <th scope="col" class="text-right px-4 py-3">Matched</th>
+        <th scope="col" class="text-left px-4 py-3">Status</th>
+        <th scope="col" class="text-right px-4 py-3">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for run in runs %}
+      <tr id="run-{{ run.id }}" class="border-t" style="border-color: var(--border);">
+        <td class="px-4 py-3 font-mono text-xs">{{ run.started_at }}</td>
+        <td class="px-4 py-3">
+          <a href="/runs/{{ run.id }}" style="color: var(--wm-spark-100);">
+            {{ run.video_path.split('/')[-1] if run.video_path else '-' }}
+          </a>
+        </td>
+        <td class="px-4 py-3">{{ run.mode }}</td>
+        <td class="px-4 py-3 text-right font-mono">
+          {{ run.total_frames if run.total_frames is not none else '-' }}
+        </td>
+        <td class="px-4 py-3 text-right font-mono">
+          {{ run.matched_count if run.matched_count is not none else '-' }}
+        </td>
+        <td class="px-4 py-3">
+          <span class="badge badge-{{ run.status }}">{{ run.status }}</span>
+        </td>
+        <td class="px-4 py-3 text-right">
+          <button type="button"
+                  class="btn btn-destructive text-xs"
+                  hx-delete="/runs/{{ run.id }}"
+                  hx-confirm="Delete run #{{ run.id }} and all its picks?"
+                  hx-target="#run-{{ run.id }}"
+                  hx-swap="outerHTML">
+            Delete
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="text-center py-16 rounded-lg border"
+     style="background: var(--surface); border-color: var(--border);">
+  <p class="text-lg m-0 mb-4" style="color: var(--text-muted);">No runs yet.</p>
+  <a href="/runs/new" class="btn btn-primary">Start Your First Run</a>
+</div>
+{% endif %}
+{% endblock %}
