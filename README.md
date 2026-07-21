@@ -227,6 +227,57 @@ Edit `config/config.json`:
 - **`exact`** — case-insensitive full-line match
 - **`regex`** — Python regex pattern matching
 
+### Frame Extraction Modes
+
+Since Phase 1 the `frame_extractor` supports three extraction strategies
+selected via the top-level `extraction_mode` config key. Default is
+`"interval"` — existing configs keep working with byte-identical output.
+
+| Mode | Behavior |
+|---|---|
+| `interval` (default) | Sample one frame every `frame_interval_seconds` — the pre-Phase-1 baseline |
+| `scene` | Extract only frames where ffmpeg detects a scene change above `threshold`; PTS-driven filenames |
+| `hybrid` | Two-pass merge — scene detection PLUS a `max_gap_seconds` fallback tick, debounced together |
+
+Config snippets:
+
+```jsonc
+// scene mode
+"extraction_mode": "scene",
+"scene_config": { "threshold": 0.3, "min_gap_seconds": 1.0 }
+
+// hybrid mode (recommended default for unknown content)
+"extraction_mode": "hybrid",
+"scene_config": {
+  "threshold": 0.3,
+  "min_gap_seconds": 1.0,
+  "max_gap_seconds": 10.0
+}
+```
+
+Drop-in ready examples live at `config/config.scene.example.json` and
+`config/config.hybrid.example.json`.
+
+#### When to use which
+
+| Content type | Recommended mode |
+|---|---|
+| Broadcast TV / screen recording | `scene` or `hybrid` |
+| Slow-changing / mostly static content | `hybrid` |
+| Unknown / mixed content | `hybrid` |
+| Legacy / need exact reproducibility vs pre-Phase-1 | `interval` |
+
+Compare the three modes on your own video with the benchmark script:
+
+```bash
+python benchmark_extraction.py --video ./input_videos/your_video.mp4
+```
+
+It prints a markdown table of frame counts + wall time + unique matched
+keywords per mode, and exits **non-zero** if scene mode loses any keyword
+the interval baseline found. Useful as a pre-commit / CI gate when
+tuning `threshold` and `min_gap_seconds` for a particular corpus.
+
 ---
 
 ## Output Structure
