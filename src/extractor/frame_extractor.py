@@ -282,6 +282,23 @@ _EXTRACTORS = {
 }
 
 
+def _validate_extraction_config(cfg: dict) -> str:
+    """
+    Resolve and validate ``cfg['extraction_mode']``, returning the
+    normalized (lower-cased) mode name.
+
+    Fails fast per D6 when the mode is not a registered extractor. Mode-
+    specific parameter validation (scene threshold, hybrid gaps, …) lives
+    inside the individual strategy functions — plan 01-02 wires those up.
+    """
+    mode = str(cfg.get("extraction_mode", "interval")).lower()
+    if mode not in _EXTRACTORS:
+        raise FrameExtractionError(
+            f"extraction_mode {mode!r} invalid. Must be one of: {sorted(_EXTRACTORS)}"
+        )
+    return mode
+
+
 def extract_frames(
     video_path: str,
     output_dir: str,
@@ -311,13 +328,7 @@ def extract_frames(
     cfg["frame_interval_seconds"] = interval_seconds
 
     video = _validate_inputs(video_path, interval_seconds)
-
-    mode = str(cfg.get("extraction_mode", "interval")).lower()
-    if mode not in _EXTRACTORS:
-        raise FrameExtractionError(
-            f"extraction_mode {mode!r} not yet implemented (lands in plan 01-02). "
-            f"Supported: {sorted(_EXTRACTORS)}"
-        )
+    mode = _validate_extraction_config(cfg)
 
     logger.info(
         "Frame extraction started | mode=%s | video=%r | interval=%ds | output_dir=%r",
