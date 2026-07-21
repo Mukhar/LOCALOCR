@@ -22,36 +22,36 @@
   </p>
 </header>
 
-<!-- Live progress panel: SSE stream lands in plan 03-04.
-     For now render a static placeholder that hides itself once the
-     run has finished, so completed-run detail pages don't show
-     empty progress noise. -->
+{# Live progress panel.
+   For RUNNING runs: lazy-fetch the panel via HTMX so the SSE stream
+   opens as soon as the fragment lands. Kept as a separate fetch so
+   this initial page render doesn't wait on the panel template.
+   For finished runs: skip entirely; the header already shows the
+   final state and there's nothing to stream. #}
 {% if run.status == 'running' %}
-<section id="progress" class="rounded-lg border p-4 mb-6"
-         style="background: var(--surface); border-color: var(--border);">
-  <h2 class="text-lg font-semibold m-0 mb-3">Live progress</h2>
-  <p id="progress-body" class="m-0 text-sm" style="color: var(--text-muted);">
-    Waiting for the first event...
-    (SSE stream wires up in plan 03-04; refresh the page to see the current state.)
-  </p>
-</section>
+<div hx-get="/runs/{{ run.id }}/progress"
+     hx-trigger="load"
+     hx-swap="outerHTML"></div>
 {% endif %}
 
-<!-- Video player: source served by /videos/{name}. Byte-range enabled
-     via FastAPI FileResponse. Click-to-seek handler lands in plan 03-04. -->
+{# Video player: byte-range enabled via FastAPI FileResponse.
+   id="source-video" is the anchor seek.js targets on data-seek clicks. #}
 {% if run.video_path %}
 {% set video_name = run.video_path.split('/')[-1] %}
 <section class="rounded-lg border p-4 mb-6"
          style="background: var(--surface); border-color: var(--border);">
   <h2 class="text-lg font-semibold m-0 mb-3">Video</h2>
-  <video id="run-video" controls preload="metadata" class="w-full max-h-96 rounded">
+  <video id="source-video"
+         controls
+         preload="metadata"
+         class="w-full max-h-96 rounded"
+         style="background: #000;">
     <source src="/videos/{{ video_name }}" type="video/mp4">
     Your browser does not support embedded video.
   </video>
 </section>
 {% endif %}
 
-<!-- Stock picks grid -->
 <section>
   <h2 class="text-2xl font-bold mb-4">Picks ({{ picks|length }})</h2>
   {% if picks %}
@@ -69,4 +69,10 @@
   </p>
   {% endif %}
 </section>
+{% endblock %}
+
+{% block scripts %}
+{# Loaded on every page so HTMX-swapped-in pick cards still get the
+   delegated click handler. `defer` keeps parg off the critical path. #}
+<script src="/static/seek.js" defer></script>
 {% endblock %}

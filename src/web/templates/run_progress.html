@@ -1,0 +1,158 @@
+{# run_progress.html
+   Fragment (NOT a full base.html extension) -- swapped into
+   run_detail.html via `hx-get /runs/{id}/progress` on page load.
+
+   How SSE flows:
+     1. This section has `hx-ext="sse"` + `sse-connect="/runs/{id}/events"`
+        which activates HTMX's SSE extension the moment the fragment
+        lands in the DOM.
+     2. Every incoming event fires a `htmx:sseMessage` DOM event.
+     3. Our tiny listener parses event.detail.data (JSON), switches on
+        the event type, and updates the appropriate <span> or appends
+        a log line.
+     4. On the terminal `done` event we reload the page so the picks
+        grid, header status, and finish time all pick up the final DB
+        state without maintaining a client-side model.
+
+   Accessibility:
+     - aria-live="polite" on the whole section so screen readers announce
+       counter changes without interrupting the current utterance.
+     - aria-atomic="false" so only the changed sub-region is re-read. #}
+
+<section id="live-progress"
+         aria-live="polite"
+         aria-atomic="false"
+         aria-label="Live pipeline progress"
+         hx-ext="sse"
+         sse-connect="/runs/{{ run.id }}/events"
+         class="rounded-lg border p-4 mb-6"
+         style="background: var(--surface); border-color: var(--border);">
+
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-lg font-semibold m-0">Live progress</h2>
+    <span id="run-status" class="badge badge-{{ run.status }}">{{ run.status }}</span>
+  </div>
+
+  <dl class="grid grid-cols-3 gap-3 text-sm mb-3">
+    <div>
+      <dt style="color: var(--text-muted);">Frames</dt>
+      <dd id="run-frames" class="m-0 font-mono text-lg">
+        {{ run.total_frames if run.total_frames is not none else '-' }}
+      </dd>
+    </div>
+    <div>
+      <dt style="color: var(--text-muted);">Matched</dt>
+      <dd id="run-matched" class="m-0 font-mono text-lg">
+        {{ run.matched_count if run.matched_count is not none else '-' }}
+      </dd>
+    </div>
+    <div>
+      <dt style="color: var(--text-muted);">Phase</dt>
+      <dd id="run-phase" class="m-0 font-mono text-lg">-</dd>
+    </div>
+  </dl>
+
+  {# Log tail. We cap at 200 lines client-side so a chatty run doesn't
+     grow the DOM without bound. Screen readers won't announce this
+     region because we don't want a flood -- aria-live is on the parent
+     but the log itself is aria-live="off" via an explicit override. #}
+  <div id="run-log"
+       aria-live="off"
+       role="log"
+       class="text-xs font-mono max-h-48 overflow-y-auto p-2 rounded"
+       style="background: #000; color: #b8f8b8;">
+    <div style="color: var(--text-muted);">Waiting for the first event...</div>
+  </div>
+</section>
+
+<script>
+(function() {
+  // Guard: don't re-attach the listener on repeated HTMX swaps.
+  if (window.__localocrSseWired) return;
+  window.__localocrSseWired = true;
+
+  var MAX_LOG_LINES = 200;
+
+  // Level -> color map. Kept flat so screen-reader users get no styling
+  // meaning; sighted users get quick visual scanning.
+  var LEVEL_COLORS = {
+    DEBUG: '#8ab4f8',
+    INFO:  '#b8f8b8',
+    WARN:  '#ffc220',
+    WARNING: '#ffc220',
+    ERROR: '#ff8a80',
+    CRITICAL: '#ff8a80',
+  };
+
+  function appendLog(level, message, logger) {
+    var log = document.getElementById('run-log');
+    if (!log) return;
+    // Clear the initial "Waiting..." placeholder on first real line.
+    if (log.children.length === 1 && log.firstElementChild.textContent.indexOf('Waiting') === 0) {
+      log.innerHTML = '';
+    }
+    var line = document.createElement('div');
+    line.textContent = '[' + (level || 'INFO') + '] ' + (message || '');
+    line.style.color = LEVEL_COLORS[level] || '#b8f8b8';
+    log.appendChild(line);
+    // Trim head to keep DOM bounded.
+    while (log.children.length > MAX_LOG_LINES) {
+      log.removeChild(log.firstChild);
+    }
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function setStatus(status) {
+    var el = document.getElementById('run-status');
+    if (!el) return;
+    el.textContent = status;
+    // Reset all badge- classes so the class matches the new status.
+    el.className = 'badge badge-' + status;
+  }
+
+  document.body.addEventListener('htmx:sseMessage', function(evt) {
+    var data;
+    try { data = JSON.parse(evt.detail.data); }
+    catch (e) { return; }
+    if (!data || typeof data !== 'object') return;
+
+    switch (data.type) {
+      case 'log':
+        appendLog(data.level, data.message, data.logger);
+        // Cheap "current phase" extraction from step-counter log lines.
+        var m = /^\[Step (\d+\/\d+)\]\s*(.+)$/.exec(data.message || '');
+        if (m) {
+          var phase = document.getElementById('run-phase');
+          if (phase) phase.textContent = m[1] + ' ' + m[2].replace(/\.\.\.$/, '');
+        }
+        break;
+
+      case 'summary':
+        var s = data.summary || {};
+        var f = document.getElementById('run-frames');
+        var mm = document.getElementById('run-matched');
+        if (f  && s.total_frames   != null) f.textContent  = s.total_frames;
+        if (mm && s.matched_frames != null) mm.textContent = s.matched_frames;
+        break;
+
+      case 'queued':
+        var phaseEl = document.getElementById('run-phase');
+        if (phaseEl) phaseEl.textContent = 'Queued (position ' + (data.queued_position || '?') + ')';
+        setStatus('queued');
+        break;
+
+      case 'done':
+        setStatus(data.status || 'completed');
+        appendLog('INFO', 'Run finished: ' + (data.status || 'completed'));
+        // Reload after a short delay so the user sees the final status
+        // badge flip before the page rehydrates from the DB.
+        setTimeout(function() { window.location.reload(); }, 1500);
+        break;
+
+      case 'error':
+        appendLog('ERROR', data.message || 'unknown error');
+        break;
+    }
+  });
+})();
+</script>
