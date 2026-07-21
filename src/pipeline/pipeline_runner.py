@@ -146,7 +146,7 @@ def run_pipeline(config: dict) -> dict:
     # Step 1: Frame Extraction
     logger.info("[Step 1/4] Extracting frames...")
     try:
-        frames = extract_frames(video_path, str(frames_dir), interval)
+        frames = extract_frames(video_path, str(frames_dir), interval, cfg=config)
     except FrameExtractionError as exc:
         raise PipelineError(f"Frame extraction failed: {exc}") from exc
 

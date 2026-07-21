@@ -8,6 +8,8 @@ Output naming convention:
     e.g. frame_0003_00m06s.png  — 3rd frame at 6 s into the video
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -215,12 +217,25 @@ def extract_frames(
     video_path: str,
     output_dir: str,
     interval_seconds: int = 2,
+    cfg: dict | None = None,
 ) -> list:
     """
     Extract PNG frames from an MP4 video at a fixed time interval.
 
+    Parameters
+    ----------
+    video_path, output_dir, interval_seconds
+        Same meaning as pre-v1.1.
+    cfg
+        Optional full pipeline config dict. Reserved for future extraction
+        modes (plan 01-02 will read ``extraction_mode`` / ``scene_config``
+        from it). When ``None`` or empty, behavior is byte-identical to
+        the pre-v1.1 build — the D2 backward-compat contract.
+
     Returns list of dicts with: frame_path, frame_name, timestamp, frame_number
     """
+    cfg = cfg or {}
+
     video = _validate_inputs(video_path, interval_seconds)
 
     logger.info(
