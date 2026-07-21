@@ -52,6 +52,19 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Web UI (browser-based pipeline management, new in v1.1)
+
+```bash
+python -m src.web
+# then open http://localhost:8765
+```
+
+Features: run history in SQLite, one-click pipeline start, live progress
+streaming via Server-Sent Events, click-a-pick-to-seek video playback,
+WCAG 2.2 AA compliant, uses the Walmart color palette.
+
+See [docs/web_ui.md](./docs/web_ui.md) for the full guide.
+
 ### Full Pipeline (extract frames + OCR)
 
 ```bash

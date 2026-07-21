@@ -28,6 +28,21 @@ post_ocr_pipeline.py (standalone post-OCR pipeline)
 └── Phase 3 — HTML Dashboard (viewer.html, runs in background thread)
 
 src/analyzer/ollama_analyzer.py (lower-level Ollama vision helper)
+
+src/web/ (optional FastAPI web UI, new in v1.1)
+├── __init__.py                     (create_app factory)
+├── __main__.py                     (`python -m src.web` -> uvicorn @ localhost:8765)
+├── routes/
+│   ├── runs.py                     (GET/POST /runs, GET /runs/{id}, DELETE)
+│   ├── videos.py                   (GET/POST /videos, GET /videos/{name})
+│   └── progress.py                 (SSE stream + progress panel fragment)
+├── services/
+│   ├── db.py                       (SQLite repository: runs + picks tables)
+│   ├── event_bus.py                (async pub/sub keyed by run_id)
+│   ├── run_manager.py              (subprocess supervisor, max_concurrent=1)
+│   └── runner_subprocess.py        (pipeline entry point per run)
+├── templates/*.html                (Jinja2 + Tailwind CDN + HTMX)
+└── static/seek.js                  (15-line delegated click handler)
 ```
 
 ## Pipeline Modes
@@ -159,9 +174,98 @@ Lower-level helper for sending individual matched frames to an Ollama vision mod
 | `transcript_config.context_window_seconds` | float | Half-width of the transcript context window around each matched frame. Default `8` (±8s) |
 | `transcript_config.language` | string | Whisper `-l` flag. Default `"en"`. Use `"auto"` for auto-detect |
 
+## Web UI (`src/web/`) — new in v1.1
+
+Optional FastAPI + HTMX + Tailwind + SQLite web app. Zero JS build step.
+Boot with `python -m src.web` and open `http://localhost:8765`.
+
+### Package layout
+
+| Module                                | Responsibility                                                     |
+|---------------------------------------|--------------------------------------------------------------------|
+| `src/web/__init__.py`                 | `create_app(db_path=None)` factory; mounts routers + StaticFiles   |
+| `src/web/__main__.py`                 | `python -m src.web` entry (uvicorn on 127.0.0.1:8765)              |
+| `src/web/routes/runs.py`              | Runs list, new-run form/submit, run detail, delete                 |
+| `src/web/routes/videos.py`            | List/upload/serve videos (500 MB cap, extension allowlist)         |
+| `src/web/routes/progress.py`          | SSE stream + progress panel fragment                               |
+| `src/web/services/db.py`              | SQLite repository (schema_version=1)                               |
+| `src/web/services/event_bus.py`       | In-memory async pub/sub keyed by `run_id`; done-terminates         |
+| `src/web/services/run_manager.py`     | Spawns subprocesses, pumps stdout events, finalizes DB rows        |
+| `src/web/services/runner_subprocess.py` | Structured-JSON stdout event emitter; wraps `run_pipeline()`     |
+| `src/web/templates/*.html`            | Jinja2 (autoescape on) + Tailwind + HTMX; Walmart palette          |
+| `src/web/static/seek.js`              | 15-line delegated click handler for click-to-seek video            |
+
+### SQLite schema (`output/localocr.sqlite`)
+
+Two tables. Schema version tracked via `PRAGMA user_version`.
+
+- **`runs`**: `id`, `video_path`, `config_json`, `mode`, `status`,
+  `started_at`, `finished_at`, `total_frames`, `matched_count`,
+  `summary_json`
+- **`picks`**: `id`, `run_id` (FK CASCADE), `analyst`, `stock_pick`,
+  `current_price`, `target`, `stop_loss`, `frame_path`,
+  `frame_timestamp_seconds`, `transcript_context`, `raw_json`
+
+Denormalized so common queries (list picks, filter by analyst) don't
+need to parse `raw_json`. `raw_json` remains the source of truth.
+
+### Event bus + SSE flow
+
+1. `runner_subprocess.py` emits one JSON line per event to stdout
+   (`start`, `log`, `summary`, `error`, `done`).
+2. `RunManager._pump` (daemon thread per run) reads each line, parses,
+   calls `event_bus.publish(run_id, event)`, and persists lifecycle
+   transitions to the DB.
+3. `event_bus.subscribe(run_id)` yields events to any HTTP subscriber
+   via its own `asyncio.Queue`. Iteration terminates on `done`.
+4. `routes/progress.py::_sse_generator` wraps the async iterator in
+   `sse_starlette.EventSourceResponse`. Polls `is_disconnected()`
+   between events so browser-tab-close frees the queue promptly.
+5. In the browser, HTMX's SSE extension activates on `sse-connect`,
+   fires `htmx:sseMessage` DOM events; a small vanilla-JS listener
+   dispatches on `event.type` to update counters, append log lines,
+   and reload the page on `done`.
+
+### Subprocess-per-run isolation
+
+- Each pipeline run is a FRESH Python subprocess. Isolation ==
+  PyObjC/torch state leaks can't corrupt the server. Cancellation ==
+  clean SIGTERM (via `RunManager.cancel_run`).
+- `max_concurrent = 1` by default. Extras enqueue, emit a `queued`
+  event, spawn when a slot frees up.
+- All `_active` / `_pending` mutation happens inside a
+  `threading.Lock`; `event_bus.publish` is called OUTSIDE the lock.
+- Belt AND suspenders finalization: the pump's `finally` block
+  ALWAYS calls `finalize_run()` + publishes a terminal `done`, even
+  if the child crashed hard.
+
+### Adding new routes
+
+1. Create a router in `src/web/routes/<name>.py` with `router = APIRouter()`
+2. Add handlers with `@router.get(...)` / `@router.post(...)` etc.
+3. Register in `create_app()`:
+
+   ```python
+   from .routes import <name>
+   app.include_router(<name>.router)
+   ```
+
+4. Add tests to `tests/test_web/test_<name>.py` using `TestClient`.
+
+### Testing
+
+- `pytest tests/` — fast unit + integration tests (default)
+- `pytest -m e2e tests/e2e/` — Playwright browser tests (opt-in;
+  requires `pytest-playwright` + `playwright install chromium`)
+
+See also: [`docs/web_ui.md`](docs/web_ui.md) — end-user guide.
+
 ## Running
 
 ```bash
+# Web UI (browser-based, new in v1.1)
+python -m src.web                                          # http://localhost:8765
+
 # Full pipeline (video → frames → OCR → match → organize)
 python main.py ./config/config.json
 
@@ -180,6 +284,7 @@ python post_ocr_pipeline.py --matched-dir ./output/matched --model gemma4
 - `Pillow` (image handling)
 - `easyocr` (multilingual OCR, optional for Hindi support)
 - `requests` (Ollama API calls in post-OCR pipeline)
+- **Web UI (optional):** `fastapi`, `uvicorn[standard]`, `sse-starlette`, `python-multipart`, `aiosqlite`, `jinja2`
 - `whisper.cpp` (optional; enables Phase 2 transcription — `brew install whisper-cpp` + `ggml-base.en.bin` model; see `docs/setup_whisper.md`)
 
 ## Parallelism Model

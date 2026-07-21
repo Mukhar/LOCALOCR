@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-current_phase: 02
-current_phase_name: transcript
+current_phase: 03
+current_phase_name: web-ui
 status: complete
-last_updated: "2026-07-21T20:15:00.000Z"
+last_updated: "2026-07-21T21:00:00.000Z"
 last_activity: 2026-07-21
-last_activity_desc: Phase 02 COMPLETE (all 4 plans; 86/86 tests; whisper.cpp transcription shipped with XSS fence + docs)
+last_activity_desc: v1.1 milestone COMPLETE — all 3 phases, 12/12 plans, 150 tests
 progress:
   total_phases: 3
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 12
-  completed_plans: 7
-  percent: 58
+  completed_plans: 12
+  percent: 100
 ---
 
 # Project State
@@ -23,72 +23,59 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-21)
 
 **Core value:** Every byte of processing stays on the user's Mac — no cloud, no API keys, no data leaving the device — while still producing publication-quality structured extractions from long-form video.
-**Current focus:** Phase 02 — transcript
+**Current focus:** v1.1 milestone COMPLETE — ready for tag + release
 
 ## Current Position
 
-Phase: 02 (transcript) — EXECUTING
-Plan: 3 of 3
-Status: Phase complete — ready for verification
-Last activity: 2026-07-21 — Phase 01 execution started
+Milestone: v1.1 — COMPLETE
+Phase: 03 (web-ui) — Complete
+Plans: 12 of 12
+Status: All plans shipped, all tests green, docs updated
+Last activity: 2026-07-21 — Phase 03 all 5 plans executed in one session
 
-Progress: [░░░░░░░░░░] 0%
-
-## Plan-Check Audit Trail (Phase 1)
-
-| Pass | Verdict | Blockers | Warnings | Key findings |
-|------|---------|----------|----------|--------------|
-| 1 | FAIL | 3 | 5 | extract_frames() signature mismatch; hybrid `eq(mod(t,...)` filter semantically dead; debounce silently forced synthetic-timestamp fallback (D5 violation) |
-| 2 | FAIL | 2 | 0 | BLOCKER 1 + all warnings resolved; BLOCKERs 2/3 frontmatter updated but task bodies not rewritten (my miss) |
-| 3 | PASS | 0 | 1 | All prior BLOCKERs resolved; single non-blocking WARNING (hybrid drift-guard symmetry) folded in post-PASS |
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 0
-- Average duration: —
-- Total execution time: —
+- Total plans completed: 12
+- Test count: 150 passing (1 skipped: e2e module, needs opt-in playwright)
 
 **By Phase:**
 
-| Phase | Plans | Total | Avg/Plan |
-|-------|-------|-------|----------|
-| 1. Scene extraction | 0/3 | — | — |
-| 2. Transcript | 0/4 | — | — |
-| 3. Web UI | 0/5 | — | — |
-
-**Recent Trend:**
-
-- No plans completed yet
-
-*Updated after each plan completion*
+| Phase | Plans | Status |
+|-------|-------|--------|
+| 1. Scene extraction | 3/3 |  Complete |
+| 2. Transcript | 4/4 |  Complete |
+| 3. Web UI | 5/5 |  Complete |
 
 ## Accumulated Context
 
-### Decisions
+### Decisions (v1.1)
 
-Decisions are logged in PROJECT.md Key Decisions table.
-Recent decisions affecting current work:
+Decisions are logged in PROJECT.md Key Decisions table. Recent decisions:
 
 - Scene-change extraction is opt-in via config key (preserves backward compat)
 - whisper.cpp local transcription (over cloud API) preserves offline-first core value
-- Web UI uses FastAPI + HTMX + SQLite (Walmart default stack, zero JS build)
+- Web UI uses FastAPI + HTMX + SQLite + Tailwind (Walmart default stack, zero JS build)
+- Web UI runs each pipeline as a fresh subprocess (isolation + clean SIGTERM)
+- Web UI defaults to max_concurrent=1; extras enqueue with `queued` event
 - Speaker diarization deferred to v2 (YAGNI)
-- **Phase 1 CONTEXT D8 revised (pass 1)**: `pipeline_runner.py` allowed ONE mechanical passthrough edit (`cfg=config`) so `extract_frames()` can see `extraction_mode`. Other downstream modules remain untouched.
-- **Phase 1 hybrid mode uses two-pass merge (pass 2 fix)**: original `eq(mod(t,max_gap),0)` ffmpeg filter never fires (floats don't hit exact mod-zero boundaries). Ship a scene-pass + fps=1/max_gap pass and merge instead.
-- **Phase 1 debounce operates on `(file, pts)` pairs (pass 2 fix)**: original design only debounced timestamps, silently forcing synthetic-timestamp fallback (D5 violation). New `_debounce_pairs` helper returns kept pairs; caller unlinks losers.
+- Standalone `viewer.html` preserved for backward compat (WEBUI-10)
 
 ### Pending Todos
 
-None yet.
+None — v1.1 shipped.
 
 ### Blockers/Concerns
 
-None yet.
+None.
 
-## Deferred Items
+## Deferred Items (v2 candidates)
 
-- **DIARIZE-01/02** — Speaker diarization via `pyannote.audio` (v2)
-- **RESUME-01** — Frame-hash manifest for incremental OCR (v2)
-- **BATCH-01** — Multi-video batch mode (v2)
+- **DIARIZE-01/02** — Speaker diarization via `pyannote.audio`
+- **RESUME-01** — Frame-hash manifest for incremental OCR
+- **BATCH-01** — Multi-video batch mode via web UI
+- **PLAYWRIGHT-INSTALL** — Wire `pytest-playwright` + Chromium into CI so e2e tests run automatically
+- **AXE-CI** — Add `axe-core` in CI for quantitative WCAG 2.2 AA proof
