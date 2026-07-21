@@ -23,12 +23,21 @@ from src.matcher import match_text
 from src.context import expand_context_windows
 from src.organizer import organize_frames
 from src.analyzer import analyze_with_ollama, OllamaAnalysisError
+from src.transcript import enrich_ocr_results, kickoff_transcription
 
 logger = logging.getLogger(__name__)
 
 
 class PipelineError(Exception):
     """Raised when the pipeline encounters a fatal error."""
+
+
+# Step totals for consistent "[Step N/TOTAL]" log labels.
+# Fix for review finding B2: previously the full pipeline mixed
+# "[Step 1/5]" (steps 1-3) with "[Step 4/5]" (steps 4-5). Now every
+# label reads from these single-source-of-truth constants.
+_FULL_PIPELINE_STEPS = 5      # Extract, OCR, Match, Organize, Ollama
+_OCR_ONLY_PIPELINE_STEPS = 4  # OCR, Match, Organize, Ollama
 
 
 # ── Modes ────────────────────────────────────────────────────────────────────
@@ -144,30 +153,39 @@ def run_pipeline(config: dict) -> dict:
     logger.info("-" * 60)
 
     # Step 1: Frame Extraction
-    logger.info("[Step 1/4] Extracting frames...")
+    logger.info("[Step 1/5] Extracting frames...")
     try:
         frames = extract_frames(video_path, str(frames_dir), interval, cfg=config)
     except FrameExtractionError as exc:
         raise PipelineError(f"Frame extraction failed: {exc}") from exc
 
-    logger.info("[Step 1/4] Extracted %d frames", len(frames))
+    logger.info("[Step 1/5] Extracted %d frames", len(frames))
 
     if not frames:
         raise PipelineError("No frames extracted from video")
 
+    # Kick off whisper transcription in a background thread NOW - before
+    # OCR starts - so both run in parallel and total wall time stays
+    # close to max(OCR, whisper) rather than OCR + whisper. Never raises;
+    # any failure (missing binary/model, audio-less video) resolves the
+    # Future to None with a clear warning log.
+    transcript_cfg = dict(config.get("transcript_config", {}) or {})
+    transcript_start = time.time()
+    transcript_future = kickoff_transcription(video_path, transcript_cfg, metadata_dir)
+
     # Step 2: OCR Processing
-    logger.info("[Step 2/4] Running OCR on %d frames...", len(frames))
+    logger.info("[Step 2/5] Running OCR on %d frames...", len(frames))
     try:
         ocr_results = run_ocr(frames, languages, config)
     except OCRError as exc:
         raise PipelineError(f"OCR processing failed: {exc}") from exc
 
-    logger.info("[Step 2/4] OCR complete")
+    logger.info("[Step 2/5] OCR complete")
 
     # Step 3: Text Matching
-    logger.info("[Step 3/4] Matching text against %d keywords...", len(keywords))
+    logger.info("[Step 3/5] Matching text against %d keywords...", len(keywords))
     matched_results = match_text(ocr_results, keywords, match_mode)
-    logger.info("[Step 3/4] Matching complete")
+    logger.info("[Step 3/5] Matching complete")
 
     # Step 3b: Context Window Expansion (context mode only)
     if mode == MODE_CONTEXT:
@@ -203,6 +221,31 @@ def run_pipeline(config: dict) -> dict:
     else:
         logger.info("[Step 5/5] Ollama analysis skipped (set ollama_config.enabled=true to enable)")
 
+    # ----- Await background transcription and enrich matched results -----
+    # Runs AFTER organize / Ollama so the transcript thread has maximum
+    # parallel headroom. Whisper on base.en typically finishes before OCR,
+    # so this is usually a no-op wait. Timeout matches whisper's own cap.
+    transcript_segments: list = []
+    if transcript_future is not None:
+        try:
+            result = transcript_future.result(timeout=3600)
+            if result:
+                transcript_segments = result
+                transcript_elapsed = time.time() - transcript_start
+                logger.info(
+                    "Transcription complete: %d segments in %.2fs (background)",
+                    len(transcript_segments), transcript_elapsed,
+                )
+        except Exception as exc:  # noqa: BLE001 - background failures must not crash the run
+            logger.warning("Transcription future failed unexpectedly: %s", exc)
+
+    if transcript_segments:
+        window = float(transcript_cfg.get("context_window_seconds", 8))
+        matched_results = enrich_ocr_results(matched_results, transcript_segments, window)
+        logger.info(
+            "Enriched matched frames with transcript_context (window=±%.1fs)", window,
+        )
+
     # Generate Metadata
     logger.info("Generating metadata...")
     metadata = _generate_metadata(matched_results, metadata_dir)
@@ -221,6 +264,7 @@ def run_pipeline(config: dict) -> dict:
         "processing_time_seconds": round(elapsed, 2),
         "metadata_file": str(metadata),
         "ollama_analysis": ollama_summary,
+        "transcript_segments_count": len(transcript_segments),
     }
 
     logger.info("=" * 60)
@@ -331,18 +375,27 @@ def run_ocr_only_pipeline(config: dict, frames_dir: Optional[str] = None) -> dic
     logger.info("Output: %s", output_dir)
     logger.info("-" * 60)
 
+    # OCR-only mode has no video path, so there's nothing to transcribe.
+    # Log an explicit skip so users know why transcript.json isn't produced
+    # (TRANSCRIPT-07). Do this even when transcript_config is disabled -
+    # the log line is about the mode, not the config.
+    if config.get("transcript_config", {}).get("enabled"):
+        logger.info(
+            "Transcription skipped: --ocr-only mode has no video to extract audio from"
+        )
+
     # Step 1: OCR Processing
-    logger.info("[Step 1/3] Running OCR on %d frames...", len(frames))
+    logger.info("[Step 1/4] Running OCR on %d frames...", len(frames))
     try:
         ocr_results = run_ocr(frames, languages, config)
     except OCRError as exc:
         raise PipelineError(f"OCR processing failed: {exc}") from exc
-    logger.info("[Step 1/3] OCR complete")
+    logger.info("[Step 1/4] OCR complete")
 
     # Step 2: Text Matching
-    logger.info("[Step 2/3] Matching text against %d keywords...", len(keywords))
+    logger.info("[Step 2/4] Matching text against %d keywords...", len(keywords))
     matched_results = match_text(ocr_results, keywords, match_mode)
-    logger.info("[Step 2/3] Matching complete")
+    logger.info("[Step 2/4] Matching complete")
 
     # Step 2b: Context Window Expansion (context mode only)
     if mode == MODE_CONTEXT:
@@ -434,6 +487,11 @@ def _generate_metadata(results: list, metadata_dir: Path) -> Path:
         if entry["is_context"]:
             entry["context_for_keyword"] = result.get("context_for_keyword")
             entry["anchor_frame_number"] = result.get("anchor_frame_number")
+        # Optional: transcript_context is added by src.transcript.correlator
+        # only for matched frames when transcription ran. Missing key ->
+        # dashboard falls back to "no spoken context available".
+        if "transcript_context" in result:
+            entry["transcript_context"] = result["transcript_context"]
         all_metadata.append(entry)
 
     output_file = metadata_dir / "ocr_results.json"
