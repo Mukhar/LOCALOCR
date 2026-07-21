@@ -213,66 +213,32 @@ def _finalize_frames(
     return finalized
 
 
-def extract_frames(
-    video_path: str,
-    output_dir: str,
-    interval_seconds: int = 2,
-    cfg: dict | None = None,
-) -> list:
+def _extract_by_interval(
+    video: Path,
+    out_path: Path,
+    tmp_dir: Path,
+    ffmpeg_bin: str,
+    duration: float,
+    cfg: dict,
+) -> list[dict]:
     """
-    Extract PNG frames from an MP4 video at a fixed time interval.
+    Fixed-fps extraction strategy — the original v1.0 behavior.
 
-    Parameters
-    ----------
-    video_path, output_dir, interval_seconds
-        Same meaning as pre-v1.1.
-    cfg
-        Optional full pipeline config dict. Reserved for future extraction
-        modes (plan 01-02 will read ``extraction_mode`` / ``scene_config``
-        from it). When ``None`` or empty, behavior is byte-identical to
-        the pre-v1.1 build — the D2 backward-compat contract.
-
-    Returns list of dicts with: frame_path, frame_name, timestamp, frame_number
+    Samples one frame every ``cfg['frame_interval_seconds']`` seconds via
+    ``-vf fps=1/N``. Each kept frame's timestamp is synthesized as
+    ``i * interval`` (matches the pre-refactor formula
+    ``(frame_number - 1) * interval`` for canonical tmp names).
     """
-    cfg = cfg or {}
-
-    video = _validate_inputs(video_path, interval_seconds)
-
-    logger.info(
-        "Frame extraction started | video=%r | interval=%ds | output_dir=%r",
-        str(video), interval_seconds, output_dir,
-    )
-
-    ffmpeg_bin = _require_binary("ffmpeg")
-    ffprobe_bin = _require_binary("ffprobe")
-
-    duration = _probe_video(video, ffprobe_bin)
-    logger.debug("Video duration: %.2f s", duration)
-
-    out_path = Path(output_dir).resolve()
-    tmp_dir = out_path / ".tmp_extract"
-
-    try:
-        # Clean up stale temp files from any interrupted previous run
-        if tmp_dir.exists():
-            for stale in tmp_dir.iterdir():
-                stale.unlink(missing_ok=True)
-        out_path.mkdir(parents=True, exist_ok=True)
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise FrameExtractionError(
-            f"Cannot create output directory {str(out_path)!r}: {exc}"
-        ) from exc
-
+    interval = int(cfg.get("frame_interval_seconds", 2))
     tmp_pattern = str(tmp_dir / "frame_%04d.png")
-    expected_frames = max(1, int(duration / interval_seconds))
+    expected_frames = max(1, int(duration / interval))
 
     cmd = [
         ffmpeg_bin,
         "-hide_banner",
         "-loglevel", "error",
         "-i", str(video),
-        "-vf", f"fps=1/{interval_seconds}",
+        "-vf", f"fps=1/{interval}",
         "-vsync", "vfr",
         tmp_pattern,
     ]
@@ -299,12 +265,87 @@ def extract_frames(
     logger.info("Renaming %d extracted frame(s)\u2026", len(tmp_frames))
 
     # Interval mode: the i-th kept frame corresponds to i * interval seconds
-    # from the start of the video. This matches the pre-refactor formula
-    # `(frame_number - 1) * interval_seconds` whenever tmp filenames are the
-    # canonical `frame_0001.png`, `frame_0002.png`, ... sequence ffmpeg
-    # produces via `-vf fps=1/N`.
-    timestamps = [i * interval_seconds for i in range(len(tmp_frames))]
-    extracted = _finalize_frames(tmp_dir, out_path, timestamps)
+    # from the start of the video. Matches the pre-refactor formula
+    # `(frame_number - 1) * interval` for canonical `frame_NNNN.png` names.
+    timestamps = [i * interval for i in range(len(tmp_frames))]
+    return _finalize_frames(tmp_dir, out_path, timestamps)
+
+
+# Extraction-mode dispatch table. Plan 01-02 fills in ``scene`` and ``hybrid``
+# entries. Adding a new mode is: (1) write a strategy function with the same
+# ``(video, out_path, tmp_dir, ffmpeg_bin, duration, cfg) -> list[dict]``
+# signature, (2) register it here.
+_EXTRACTORS = {
+    "interval": _extract_by_interval,
+    # "scene":   TODO — plan 01-02
+    # "hybrid":  TODO — plan 01-02
+}
+
+
+def extract_frames(
+    video_path: str,
+    output_dir: str,
+    interval_seconds: int = 2,
+    cfg: dict | None = None,
+) -> list:
+    """
+    Extract PNG frames from a video using the configured extraction mode.
+
+    Parameters
+    ----------
+    video_path, output_dir, interval_seconds
+        Same meaning as pre-v1.1. ``interval_seconds`` (positional) is
+        reconciled into ``cfg['frame_interval_seconds']`` so strategy
+        helpers can read a single source of truth.
+    cfg
+        Optional full pipeline config dict. When ``None`` or empty, behavior
+        defaults to ``extraction_mode='interval'`` — byte-identical to the
+        pre-v1.1 build (the D2 backward-compat contract).
+
+    Returns list of dicts with: frame_path, frame_name, timestamp, frame_number
+    """
+    # Copy so we don't mutate the caller's dict.
+    cfg = dict(cfg or {})
+    # Positional interval_seconds wins over any stale cfg value so direct
+    # callers (`extract_frames(v, o, 5)`) keep getting what they asked for.
+    cfg["frame_interval_seconds"] = interval_seconds
+
+    video = _validate_inputs(video_path, interval_seconds)
+
+    mode = str(cfg.get("extraction_mode", "interval")).lower()
+    if mode not in _EXTRACTORS:
+        raise FrameExtractionError(
+            f"extraction_mode {mode!r} not yet implemented (lands in plan 01-02). "
+            f"Supported: {sorted(_EXTRACTORS)}"
+        )
+
+    logger.info(
+        "Frame extraction started | mode=%s | video=%r | interval=%ds | output_dir=%r",
+        mode, str(video), interval_seconds, output_dir,
+    )
+
+    ffmpeg_bin = _require_binary("ffmpeg")
+    ffprobe_bin = _require_binary("ffprobe")
+
+    duration = _probe_video(video, ffprobe_bin)
+    logger.debug("Video duration: %.2f s", duration)
+
+    out_path = Path(output_dir).resolve()
+    tmp_dir = out_path / ".tmp_extract"
+
+    try:
+        # Clean up stale temp files from any interrupted previous run
+        if tmp_dir.exists():
+            for stale in tmp_dir.iterdir():
+                stale.unlink(missing_ok=True)
+        out_path.mkdir(parents=True, exist_ok=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise FrameExtractionError(
+            f"Cannot create output directory {str(out_path)!r}: {exc}"
+        ) from exc
+
+    extracted = _EXTRACTORS[mode](video, out_path, tmp_dir, ffmpeg_bin, duration, cfg)
 
     try:
         tmp_dir.rmdir()
