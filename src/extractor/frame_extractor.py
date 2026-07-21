@@ -343,14 +343,212 @@ def _extract_by_interval(
     return _finalize_frames(tmp_dir, out_path, timestamps)
 
 
-# Extraction-mode dispatch table. Plan 01-02 fills in ``scene`` and ``hybrid``
-# entries. Adding a new mode is: (1) write a strategy function with the same
+def _extract_by_scene(
+    video: Path,
+    out_path: Path,
+    tmp_dir: Path,
+    ffmpeg_bin: str,
+    duration: float,
+    cfg: dict,
+) -> list[dict]:
+    """
+    Scene-change extraction strategy.
+
+    Uses ffmpeg's ``select='gt(scene,T)'`` filter to keep only frames whose
+    inter-frame scene-change score exceeds ``threshold``. The ``showinfo``
+    filter is chained so ffmpeg logs each kept frame's PTS to stderr; we
+    parse those PTS values and use them (real timestamps — D5) to name
+    output files. Close-together scene fires are debounced by
+    ``min_gap_seconds`` and losing tmp files are unlinked so
+    ``_finalize_frames`` sees a directory whose contents match ``kept_ts`` 1:1.
+
+    scene_config keys read here:
+      - threshold        (float in [0.0, 1.0]; default 0.3)
+      - min_gap_seconds  (float >= 0;         default 1.0)
+    """
+    scene_cfg = cfg.get("scene_config", {}) or {}
+    threshold = float(scene_cfg.get("threshold", 0.3))
+    min_gap = float(scene_cfg.get("min_gap_seconds", 1.0))
+
+    tmp_pattern = str(tmp_dir / "frame_%04d.png")
+    cmd = [
+        ffmpeg_bin, "-hide_banner", "-loglevel", "info",
+        "-i", str(video),
+        "-vf", f"select='gt(scene,{threshold})',showinfo",
+        "-vsync", "vfr",
+        tmp_pattern,
+    ]
+    timeout = max(300, int(duration) * 3)
+    stderr = _run_ffmpeg(cmd, str(video), timeout, capture_stderr=True)
+
+    raw_ts = _parse_showinfo_pts(stderr or "")
+    tmp_frames = sorted(tmp_dir.glob("frame_*.png"))
+
+    if not tmp_frames:
+        raise FrameExtractionError(
+            f"ffmpeg scene mode wrote no frames for {str(video)!r} "
+            f"(threshold={threshold} may be too high)."
+        )
+
+    # ffmpeg writes one file per selected frame; PTS list SHOULD match. If NOT,
+    # we have real parser/container drift — fall back to synthetic timestamps
+    # with a WARNING. This preserves D5 as "real PTS unless proven impossible".
+    if len(tmp_frames) != len(raw_ts):
+        logger.warning(
+            "Scene extraction: file count %d != PTS count %d BEFORE debounce "
+            "\u2014 parser or container drift, using synthetic timestamps as fallback",
+            len(tmp_frames), len(raw_ts),
+        )
+        interval = int(cfg.get("frame_interval_seconds", 2))
+        synthetic = [i * interval for i in range(len(tmp_frames))]
+        return _finalize_frames(tmp_dir, out_path, synthetic)
+
+    # Debounce (file, pts) pairs together; unlink losers so _finalize_frames
+    # sees exactly the surviving frames (BLOCKER 3 fix).
+    all_pairs = list(zip(tmp_frames, raw_ts))
+    kept_pairs = _debounce_pairs(all_pairs, min_gap)
+    kept_files = {f for f, _ in kept_pairs}
+    for tmp_file, _ in all_pairs:
+        if tmp_file not in kept_files:
+            tmp_file.unlink(missing_ok=True)
+
+    kept_ts = [p for _, p in kept_pairs]
+    return _finalize_frames(tmp_dir, out_path, kept_ts)
+
+
+def _extract_by_hybrid(
+    video: Path,
+    out_path: Path,
+    tmp_dir: Path,
+    ffmpeg_bin: str,
+    duration: float,
+    cfg: dict,
+) -> list[dict]:
+    """
+    Hybrid extraction — two ffmpeg passes merged by PTS.
+
+    Pass A: scene detection (``select='gt(scene,T)'``) into ``tmp_dir/_scene``.
+    Pass B: fixed interval tick (``fps=1/max_gap``) into ``tmp_dir/_gap``.
+    Both passes emit ``showinfo``; PTS values drive the merge.
+
+    Combined ``(file, pts)`` pairs are debounced by ``min_gap_seconds``. Scene
+    entries are placed first in the concat so a stable sort (as used by
+    ``_debounce_pairs``) prefers a scene frame over a gap frame at identical
+    PTS. Survivors are renamed into ``tmp_dir`` as canonical
+    ``frame_NNNN.png`` so the pre-existing ``_finalize_frames`` contract holds.
+
+    Fixes BLOCKER 2 — the previous single-pass modulo-based select filter
+    was semantically broken (floats almost never hit exact modulo
+    boundaries, so the fallback tick effectively never fired). This module
+    MUST NOT contain that filter anywhere;
+    ``test_frame_extractor_source_has_no_eq_mod_filter`` fences it.
+
+    scene_config keys read here:
+      - threshold        (float in [0.0, 1.0]; default 0.3)
+      - min_gap_seconds  (float >= 0;         default 1.0)
+      - max_gap_seconds  (float > 0;          default 10.0)
+    """
+    scene_cfg = cfg.get("scene_config", {}) or {}
+    threshold = float(scene_cfg.get("threshold", 0.3))
+    min_gap = float(scene_cfg.get("min_gap_seconds", 1.0))
+    max_gap = float(scene_cfg.get("max_gap_seconds", 10.0))
+
+    # Pass A: scene detection into a scoped subdir
+    scene_dir = tmp_dir / "_scene"
+    scene_dir.mkdir(exist_ok=True)
+    scene_cmd = [
+        ffmpeg_bin, "-hide_banner", "-loglevel", "info",
+        "-i", str(video),
+        "-vf", f"select='gt(scene,{threshold})',showinfo",
+        "-vsync", "vfr",
+        str(scene_dir / "frame_%04d.png"),
+    ]
+    scene_stderr = _run_ffmpeg(
+        scene_cmd, str(video),
+        max(300, int(duration) * 3),
+        capture_stderr=True,
+    ) or ""
+    scene_pts = _parse_showinfo_pts(scene_stderr)
+    scene_files = sorted(scene_dir.glob("frame_*.png"))
+
+    # Pass B: fixed-interval tick at max_gap into another scoped subdir
+    gap_dir = tmp_dir / "_gap"
+    gap_dir.mkdir(exist_ok=True)
+    gap_cmd = [
+        ffmpeg_bin, "-hide_banner", "-loglevel", "info",
+        "-i", str(video),
+        "-vf", f"fps=1/{max_gap},showinfo",
+        "-vsync", "vfr",
+        str(gap_dir / "frame_%04d.png"),
+    ]
+    gap_stderr = _run_ffmpeg(
+        gap_cmd, str(video),
+        max(300, int(duration) * 3),
+        capture_stderr=True,
+    ) or ""
+    gap_pts = _parse_showinfo_pts(gap_stderr)
+    gap_files = sorted(gap_dir.glob("frame_*.png"))
+
+    # Symmetric drift guard — mirrors _extract_by_scene's D5 fallback rigor.
+    # If either pass has file/PTS drift, log a warning and trim to the
+    # shorter list so `zip` doesn't silently discard anything.
+    if len(scene_files) != len(scene_pts):
+        logger.warning(
+            "Hybrid scene pass drift: %d files vs %d PTS \u2014 trimming",
+            len(scene_files), len(scene_pts),
+        )
+        n = min(len(scene_files), len(scene_pts))
+        scene_files, scene_pts = scene_files[:n], scene_pts[:n]
+    if len(gap_files) != len(gap_pts):
+        logger.warning(
+            "Hybrid gap pass drift: %d files vs %d PTS \u2014 trimming",
+            len(gap_files), len(gap_pts),
+        )
+        n = min(len(gap_files), len(gap_pts))
+        gap_files, gap_pts = gap_files[:n], gap_pts[:n]
+
+    # Merge — debounce combined (file, pts) list. Scene entries first so the
+    # stable sort inside _debounce_pairs prefers a scene frame at equal PTS.
+    combined = list(zip(scene_files, scene_pts)) + list(zip(gap_files, gap_pts))
+
+    if not combined:
+        raise FrameExtractionError(
+            f"ffmpeg hybrid mode produced no frames for {str(video)!r} "
+            f"(threshold={threshold}, max_gap={max_gap})."
+        )
+
+    kept = _debounce_pairs(combined, min_gap)
+    kept_files_set = {f for f, _ in kept}
+
+    # Move survivors into tmp_dir with fresh sequential names so the existing
+    # _finalize_frames contract (frame_NNNN.png inputs) holds.
+    final_ts: list[float] = []
+    for i, (src, pts) in enumerate(kept, start=1):
+        dst = tmp_dir / f"frame_{i:04d}.png"
+        src.rename(dst)
+        final_ts.append(pts)
+
+    # Delete losers and clean up scoped subdirs.
+    for f in scene_files + gap_files:
+        if f.exists() and f not in kept_files_set:
+            f.unlink(missing_ok=True)
+    for d in (scene_dir, gap_dir):
+        try:
+            d.rmdir()
+        except OSError:
+            pass
+
+    return _finalize_frames(tmp_dir, out_path, final_ts)
+
+
+# Extraction-mode dispatch table. Adding a new mode is: (1) write a strategy
+# function with the same
 # ``(video, out_path, tmp_dir, ffmpeg_bin, duration, cfg) -> list[dict]``
 # signature, (2) register it here.
 _EXTRACTORS = {
     "interval": _extract_by_interval,
-    # "scene":   TODO — plan 01-02
-    # "hybrid":  TODO — plan 01-02
+    "scene":    _extract_by_scene,
+    "hybrid":   _extract_by_hybrid,
 }
 
 
