@@ -734,27 +734,39 @@ def _escape_pick_strings(value: Any) -> Any:
     return value
 
 
+def build_dashboard_html(
+    picks: list[dict],
+    timestamp: str = "",
+) -> str:
+    r"""Render the viewer dashboard HTML string for a list of picks.
+
+    Pure function -- no filesystem I/O -- so tests can assert on the
+    output directly. ``_build_html`` writes this same string to disk.
+
+    Every string in every pick is HTML-escaped server-side (recursive)
+    before being embedded in the JSON, and the emitted JSON has
+    ``</`` replaced with ``<\/`` as a defense-in-depth measure against
+    ``<script>`` tag breakout.
+    """
+    safe_picks = [_escape_pick_strings(p) for p in picks]
+    picks_json = json.dumps(safe_picks, ensure_ascii=False).replace("</", "<\\/")
+    safe_timestamp = html.escape(timestamp, quote=True)
+    return (_HTML_TEMPLATE
+            .replace("__PICKS_JSON__", picks_json)
+            .replace("__TIMESTAMP__", safe_timestamp))
+
+
 def _build_html(picks: list[dict], output_path: Path, timestamp: str) -> None:
     """
     Inject picks JSON into the HTML template and write viewer.html.
     Called from a background thread (Phase 3).
 
-    Every LLM-derived string in every pick is HTML-escaped BEFORE
-    serialization (fix W6). We also close the ``</script>``-in-JSON
-    breakout by replacing ``</`` with ``<\/`` in the emitted JSON,
-    which JavaScript parses identically but the HTML parser won't
-    treat as a script-close.
+    Delegates the actual rendering to :func:`build_dashboard_html` so
+    both the write path and the test path share ONE code path -- there
+    is no way for the on-disk output to diverge from what tests assert.
     """
     logger.info("Phase 3 [thread] -- building HTML dashboard (%d picks)", len(picks))
-
-    safe_picks = [_escape_pick_strings(p) for p in picks]
-    picks_json = json.dumps(safe_picks, ensure_ascii=False).replace("</", "<\\/")
-    safe_timestamp = html.escape(timestamp, quote=True)
-
-    html_out = (_HTML_TEMPLATE
-                .replace("__PICKS_JSON__", picks_json)
-                .replace("__TIMESTAMP__", safe_timestamp))
-
+    html_out = build_dashboard_html(picks, timestamp)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html_out, encoding="utf-8")
     logger.info("Phase 3 [thread] -- viewer.html written -> %s", output_path)
