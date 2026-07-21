@@ -1,0 +1,47 @@
+{
+  "__comment": "HYBRID MODE example. Combines ffmpeg scene-change detection (like scene mode) with a max-gap fallback tick so even long unchanging shots still get sampled. Two-pass ffmpeg run merged by PTS with debounce. Best default for mixed content / unknown footage. See README 'Frame Extraction Modes' section; run `python benchmark_extraction.py --video ...` to compare all three modes on your own footage.",
+  "video_path": "./input_videos/asset/low/june22zeebiz.mp4",
+  "frame_interval_seconds": 6,
+  "extraction_mode": "hybrid",
+  "scene_config": {
+    "threshold": 0.3,
+    "min_gap_seconds": 1.0,
+    "max_gap_seconds": 10.0
+  },
+  "mode": "context",
+  "context_mode": {
+    "frames_before": 5,
+    "frames_after": 5
+  },
+  "languages": [
+    "en"
+  ],
+  "ocr_engine": "auto",
+  "ocr_config": {
+    "easyocr_gpu": true,
+    "easyocr_confidence_threshold": 0.3,
+    "apple_vision_workers": 8,
+    "recognition_level": "accurate",
+    "use_language_correction": false,
+    "ocr_workers": 1
+  },
+  "match_keywords": [
+    "FII",
+    "Vikas Sethi",
+    "Sandeep Jain",
+    "संदीप जैन की राय",
+    "सेठी",
+    "सदाबहार"
+  ],
+  "match_mode": "contains",
+  "output_directory": "./output",
+  "log_directory": "./logs",
+  "ollama_config": {
+    "enabled": false,
+    "url": "http://localhost:11434",
+    "model": "gemma4",
+    "prompt": "Analyze this screenshot. Extract and describe all visible text, numbers, names, and any financial or informational content shown.",
+    "timeout_seconds": 120,
+    "include_context_in_vision_analysis": false
+  }
+}
