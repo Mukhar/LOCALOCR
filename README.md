@@ -16,6 +16,7 @@ A fully local, offline macOS pipeline that extracts frames from videos, runs OCR
 - **Batch Directory Processing** — process every video in a directory sequentially
 - **Keyword Matching** — contains, exact, or regex matching; supports Unicode (Hindi keywords)
 - **Auto-Organization** — matched frames sorted into keyword-named folders
+- **Speaker Attribution (whisper.cpp)** — optional local audio transcription runs in parallel with OCR; every matched frame gains a `transcript_context` block (`before` / `at` / `after` / `speaker`) that flows into the LLM vision prompts and the HTML dashboard
 - **Metadata Export** — full OCR results stored as JSON
 - **Structured Logging** — console (INFO) + file (DEBUG) logging
 
@@ -345,6 +346,47 @@ unique_matched_keywords)` per mode. Exit codes:
 Useful as a **pre-commit / CI gate** when tuning `threshold` and
 `min_gap_seconds` for a particular corpus — non-zero exit stops the
 pipeline when a config regression drops keyword coverage.
+
+---
+
+## Speaker Attribution (Transcription)
+
+LOCALOCR can transcribe the video's audio with [whisper.cpp](https://github.com/ggerganov/whisper.cpp)
+in parallel with OCR, then attach a `transcript_context` block to every matched frame.
+Downstream: the LLM vision prompts in `post_ocr_pipeline.py` include the spoken context,
+and the generated `viewer.html` dashboard renders a collapsible **Spoken context** section
+per stock-pick card so you can see exactly what the anchor was saying when the pick appeared
+on screen.
+
+**Enable in 3 shell commands + 1 config edit** — full guide: [`docs/setup_whisper.md`](docs/setup_whisper.md).
+
+```bash
+brew install whisper-cpp
+mkdir -p ~/.whisper.cpp/models && cd ~/.whisper.cpp/models
+curl -L -O https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+```
+
+Add to `config/config.json`:
+
+```json
+{
+  "transcript_config": {
+    "enabled": true,
+    "model": "base.en",
+    "model_dir": "~/.whisper.cpp/models",
+    "binary": "whisper-cli",
+    "context_window_seconds": 8,
+    "language": "en"
+  }
+}
+```
+
+Or copy the ready-made example: `cp config/config.transcript.example.json config/config.json`.
+
+**Graceful degradation** — transcription is strictly additive. When `enabled: false` (default),
+or whisper.cpp / model / audio stream is missing, the main OCR pipeline runs unchanged and a
+single `WARNING` line explains the skip reason. Never blocks or crashes the pipeline the user
+actually cares about.
 
 ---
 

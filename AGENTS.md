@@ -10,6 +10,8 @@ LOCALOCR is a fully local, offline-first macOS video-to-text pipeline. It extrac
 main.py (CLI entry point)
 └── src/pipeline/pipeline_runner.py (orchestrator)
     ├── src/extractor/frame_extractor.py (ffmpeg-based frame extraction)
+    ├── src/transcript/pipeline_glue.py (background-thread transcription)
+    │   └── src/transcript/audio_extractor.py + whisper_transcriber.py (parallel with OCR)
     ├── src/ocr/ocr_engine.py (parallel OCR dispatcher)
     │   └── src/ocr/engine_factory.py (engine selection)
     │       ├── src/ocr/apple_vision_engine.py (macOS native OCR)
@@ -17,6 +19,7 @@ main.py (CLI entry point)
     │       └── src/ocr/composite_engine.py (multi-engine merge)
     ├── src/matcher/text_matcher.py (keyword matching)
     ├── src/context/context_expander.py (±N context window — context mode only)
+    ├── src/transcript/correlator.py (attaches transcript_context to matched frames)
     └── src/organizer/file_organizer.py (file categorization + ctx_ prefix)
 
 post_ocr_pipeline.py (standalone post-OCR pipeline)
@@ -79,6 +82,13 @@ Pluggable OCR engine system:
 ### `src/matcher/text_matcher.py`
 Matches OCR text against keywords. Supports `contains`, `exact`, and `regex` modes. Case-insensitive.
 
+### `src/transcript/`
+Whisper.cpp integration (Phase 2). Runs audio transcription in a background thread parallel to OCR:
+- **`audio_extractor.py`**: `extract_audio()` — ffmpeg-driven WAV extraction (16 kHz mono PCM_S16LE); raises `NoAudioStreamError` for silent-film videos.
+- **`whisper_transcriber.py`**: `transcribe()` — whisper.cpp subprocess wrapper. Binary alias fallback (`whisper-cli` → `main` → `whisper`). `Segment` is a frozen dataclass with seconds-normalized times.
+- **`correlator.py`**: Pure functions. `enrich_ocr_results()` bolts a `transcript_context` (`before`/`at`/`after`/`speaker`) onto every matched OCR result within a configurable window. Unmatched results pass through by identity.
+- **`pipeline_glue.py`**: `kickoff_transcription()` — `ThreadPoolExecutor(max_workers=1)` that runs `extract_audio` + `transcribe` and NEVER raises. Every degradation-matrix failure resolves the Future to `None` with a clear `WARNING` log.
+
 ### `src/organizer/file_organizer.py`
 Copies matched frames into `output/matched/<keyword>/` folders. Sanitizes keyword to safe folder names while preserving Unicode combining marks so Devanagari/Indic script keywords produce readable folder names.
 
@@ -96,18 +106,22 @@ Standalone LLM-powered analysis layer that runs **after** the main OCR pipeline.
 
 ### Key features
 - **Two-pass extraction**: Pass 1 extracts, Pass 2 retries with partial result if fields are null.
+- **Transcript-aware prompts**: When Phase 2 transcription ran, `_build_transcript_addendum()` appends a `Spoken context (±8s around this frame):` block to each vision prompt with quoted before/at/after snippets. Helps the model disambiguate ambiguous screens.
+- **Server-side XSS defense**: `_escape_pick_strings()` recursively HTML-escapes every string in every pick before it lands in the dashboard's embedded JSON, PLUS the emitted JSON has `</` → `<\/` as defense-in-depth against `<script>` breakout.
 - **Graceful interrupt**: `threading.Event(_stop_event)` checked before every Ollama call; partial Phase-1 data is always saved.
-- **Frame path enrichment**: `_enrich_with_frame_paths()` maps deduplicated picks back to source frames (by `stockPick` name) so the dashboard can show screenshot links.
+- **Frame path enrichment**: `_enrich_with_frame_paths()` maps deduplicated picks back to source frames (by `stockPick` name) so the dashboard can show screenshot links AND recovers dropped `transcript_context` if the dedup pass ignored it.
 - **Upside calculation**: Dashboard computes gain% from `current_price` to `target` inline in JS.
 - **Folder-analyst override**: `_apply_folder_analyst()` tags each pick with the matched keyword (folder name) as the analyst field if the model doesn't detect one.
+- **Testable rendering**: `build_dashboard_html(picks, timestamp)` is a pure function that returns the HTML string; `_build_html()` delegates to it before writing to disk.
 
 ### Metadata outputs
 
 | File | Contents |
 |------|---------|
-| `output/metadata/phase1_extractions.json` | Full per-frame extraction results including raw LLM responses and parse errors |
-| `output/metadata/phase2_deduplicated.json` | Final deduplicated picks array |
-| `output/viewer.html` | Self-contained HTML dashboard |
+| `output/metadata/phase1_extractions.json` | Full per-frame extraction results including raw LLM responses, parse errors, and `transcript_context` per pick when transcription ran |
+| `output/metadata/phase2_deduplicated.json` | Final deduplicated picks array (transcript_context preserved via `_enrich_with_frame_paths` first-frame-wins) |
+| `output/metadata/transcript.json` | (Phase 2) Full whisper transcript segments: `{start, end, text, speaker}` array. Absent when transcription disabled/failed |
+| `output/viewer.html` | Self-contained HTML dashboard with collapsible "Spoken context" section per pick card |
 
 ### CLI usage
 ```bash
@@ -138,6 +152,12 @@ Lower-level helper for sending individual matched frames to an Ollama vision mod
 | `match_mode` | string | `"contains"`, `"exact"`, `"regex"` |
 | `output_directory` | string | Base output path |
 | `log_directory` | string | Log file destination |
+| `transcript_config.enabled` | bool | Turn whisper.cpp transcription on/off. Default `false`. When `false`, pipeline behaves identically to Phase 1. |
+| `transcript_config.model` | string | Whisper model shortname; resolves to `ggml-<model>.bin`. Default `"base.en"` |
+| `transcript_config.model_dir` | string | Directory containing `ggml-*.bin` files. `~` expanded. Default `"~/.whisper.cpp/models"` |
+| `transcript_config.binary` | string | Explicit whisper.cpp CLI path/name. Auto-detect if unset (tries `whisper-cli`, `main`, `whisper`) |
+| `transcript_config.context_window_seconds` | float | Half-width of the transcript context window around each matched frame. Default `8` (±8s) |
+| `transcript_config.language` | string | Whisper `-l` flag. Default `"en"`. Use `"auto"` for auto-detect |
 
 ## Running
 
@@ -160,12 +180,14 @@ python post_ocr_pipeline.py --matched-dir ./output/matched --model gemma4
 - `Pillow` (image handling)
 - `easyocr` (multilingual OCR, optional for Hindi support)
 - `requests` (Ollama API calls in post-OCR pipeline)
+- `whisper.cpp` (optional; enables Phase 2 transcription — `brew install whisper-cpp` + `ggml-base.en.bin` model; see `docs/setup_whisper.md`)
 
 ## Parallelism Model
 
 - **Apple Vision**: `ProcessPoolExecutor` with `spawn` context — true multi-process parallelism bypassing GIL and PyObjC serialization. Controlled by `apple_vision_workers` config.
 - **EasyOCR**: Thread-safe via global `_readtext_lock` — single reader instance, serial execution.
 - **Composite**: Sub-engines run concurrently via `ThreadPoolExecutor` (different hardware: CPU/ANE vs MPS GPU).
+- **Transcription**: `ThreadPoolExecutor(max_workers=1)` in `src/transcript/pipeline_glue.py`. Kicked off right after frame extraction, awaited after Ollama analysis — whisper.cpp on base.en typically finishes before OCR on M-series hardware, so the await is often a no-op. Wall-time overhead target: <=30%.
 
 ## When Modifying Code
 
