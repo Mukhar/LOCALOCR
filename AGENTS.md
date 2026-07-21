@@ -68,8 +68,10 @@ Extracts PNG frames from video at configurable intervals using ffmpeg/ffprobe su
 ### `src/ocr/`
 Pluggable OCR engine system:
 - **`base_engine.py`**: Abstract `OCREngine` base class
-- **`engine_factory.py`**: Auto-selects engine based on language config
-- **`apple_vision_engine.py`**: macOS Vision Framework via PyObjC (fast, English-optimized)
+- **`engine_factory.py`**: **OS-aware** auto-selection: macOS→Apple Vision, Windows→Windows.Media.Ocr (if `winocr` installed) else RapidOCR, Linux→RapidOCR. Composite pairs the native Latin engine with EasyOCR/RapidOCR for Indic.
+- **`apple_vision_engine.py`**: macOS Vision Framework via PyObjC (fast, English-optimized, ANE-accelerated)
+- **`windows_media_ocr_engine.py`**: Windows.Media.Ocr WinRT API via `winocr` (native, GPU-accelerated, Windows 10+)
+- **`rapidocr_engine.py`**: PP-OCRv4 ONNX models via ONNX Runtime — cross-platform fallback (Linux/Windows). Thread-safe → uses threading path, not multiprocessing.
 - **`easyocr_engine.py`**: EasyOCR for Hindi/Indic scripts (PyTorch-backed)
 - **`composite_engine.py`**: Runs multiple engines in parallel, merges with script-aware deduplication
 - **`ocr_engine.py`**: Public `run_ocr()` function with multiprocessing/threading/serial execution paths
@@ -126,7 +128,7 @@ Lower-level helper for sending individual matched frames to an Ollama vision mod
 | `video_path` | string | Path to input video file |
 | `frame_interval_seconds` | int | Seconds between frame captures (default: 2) |
 | `languages` | list[str] | OCR languages (e.g., `["en"]`, `["hi", "en"]`) |
-| `ocr_engine` | string | `"auto"`, `"apple_vision"`, `"easyocr"`, `"composite"` |
+| `ocr_engine` | string | `"auto"`, `"apple_vision"` (macOS), `"windows_media_ocr"` (Windows), `"rapidocr"` (cross-platform), `"easyocr"`, `"composite"` |
 | `ocr_config` | object | Engine-specific settings (workers, GPU, confidence) |
 | `match_keywords` | list[str] | Keywords to search in OCR text |
 | `match_mode` | string | `"contains"`, `"exact"`, `"regex"` |

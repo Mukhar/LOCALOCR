@@ -13,6 +13,7 @@ A fully local, offline macOS pipeline that extracts frames from videos, runs OCR
 - **Hindi + English Support** — composite engine merges both engines with script-aware deduplication (Devanagari from EasyOCR, Latin from Apple Vision)
 - **OCR-Only Mode** — skip video extraction and re-run OCR on already-extracted frames
 - **Configurable Frame Intervals** — extract frames every 1, 2, 3, or N seconds
+- **Batch Directory Processing** — process every video in a directory sequentially
 - **Keyword Matching** — contains, exact, or regex matching; supports Unicode (Hindi keywords)
 - **Auto-Organization** — matched frames sorted into keyword-named folders
 - **Metadata Export** — full OCR results stored as JSON
@@ -57,6 +58,30 @@ source .venv/bin/activate
 python main.py                          # uses ./config/config.json
 python main.py path/to/config.json      # custom config
 ```
+
+### Batch Directory Mode (process videos one by one)
+
+Point `--input` (or `video_path` in config) at a directory. LOCALOCR processes supported video files directly inside that directory in sorted filename order. Each video gets its own output folder under the configured output directory, which prevents `all_frames/` and metadata files from overwriting each other.
+
+```bash
+python main.py --input ./input_videos --output ./output
+```
+
+Example output:
+
+```
+output/
+├── video_one/
+│   ├── all_frames/
+│   ├── matched/
+│   └── metadata/
+└── video_two/
+  ├── all_frames/
+  ├── matched/
+  └── metadata/
+```
+
+Supported video extensions are `.mp4`, `.webm`, `.mkv`, `.mov`, `.avi`, and `.m4v`.
 
 ### OCR-Only Mode (skip extraction, re-run OCR on existing frames)
 
@@ -165,12 +190,12 @@ Edit `config/config.json`:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `video_path` | string | *required* | Path to the input video file (mp4, webm, etc.) |
+| `video_path` | string | *required* | Path to the input video file, or a directory of videos to process sequentially |
 | `mode` | string | `"accurate"` | `"accurate"` (multi-lang OCR, no context expansion) or `"context"` (English-only OCR + ±N window). See [Pipeline Modes](#pipeline-modes) |
 | `context_mode` | dict | `{frames_before: 5, frames_after: 5}` | How many neighboring frames on each side of an anchor to copy as `ctx_*.png`. Only used when `mode == "context"` |
 | `frame_interval_seconds` | int | `2` | Seconds between frame captures |
 | `languages` | list | `["en"]` | OCR languages — **ignored in `context` mode** (forced to `["en"]`) |
-| `ocr_engine` | string | `"auto"` | `"auto"`, `"apple_vision"`, `"easyocr"`, or `"composite"` — **ignored in `context` mode** |
+| `ocr_engine` | string | `"auto"` | `"auto"`, `"apple_vision"` (macOS), `"windows_media_ocr"` (Windows), `"rapidocr"` (cross-platform), `"easyocr"`, or `"composite"` — **ignored in `context` mode** |
 | `ocr_config` | dict | `{}` | Engine-specific options — see below |
 | `match_keywords` | list | *required* | Keywords to search for (supports Unicode/Hindi). Hindi keywords will never match in `context` mode |
 | `match_mode` | string | `"contains"` | `"contains"`, `"exact"`, or `"regex"` |

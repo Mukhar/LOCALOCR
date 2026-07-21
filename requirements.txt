@@ -1,5 +1,22 @@
-pyobjc-framework-Vision>=11.0
-pyobjc-framework-Quartz>=11.0
+# ── Core (all platforms) ─────────────────────────────────────────────────────
 Pillow>=10.0
-easyocr>=1.7
 requests>=2.31.0
+
+# ── Optional: multilingual OCR (works on all platforms) ──────────────────────
+easyocr>=1.7
+
+# ── macOS-only: native Apple Vision Framework (fastest on Apple Silicon) ─────
+pyobjc-framework-Vision>=11.0; sys_platform == "darwin"
+pyobjc-framework-Quartz>=11.0; sys_platform == "darwin"
+
+# ── Cross-platform fallback: RapidOCR (PP-OCRv4 via ONNX Runtime) ────────────
+# Used automatically on Linux and as fallback on Windows.
+# For GPU acceleration, additionally install one of:
+#   pip install onnxruntime-gpu           # NVIDIA CUDA (Linux / Windows)
+#   pip install onnxruntime-directml      # Any GPU on Windows
+#   pip install onnxruntime-openvino      # Intel CPU / iGPU
+rapidocr-onnxruntime>=1.3; sys_platform != "darwin"
+
+# ── Windows-only: native Windows.Media.Ocr (GPU-accelerated, ships w/ OS) ────
+# Requires Windows 10+ and the OS language pack for the language you OCR.
+winocr>=0.0.14; sys_platform == "win32"

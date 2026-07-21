@@ -140,8 +140,11 @@ config file reference:
     languages                list     OCR language codes
                                       e.g. ["en"] or ["hi", "en"]
                                       IGNORED in context mode (forced to ["en"])
-    ocr_engine               string   "auto" | "apple_vision" | "easyocr" | "composite"
-                                      default: "auto"  (apple_vision for en-only, composite for others)
+    ocr_engine               string   "auto" | "apple_vision" | "windows_media_ocr"
+                                      | "rapidocr" | "easyocr" | "composite"
+                                      default: "auto"  (OS-aware: macOS→apple_vision,
+                                      Windows→windows_media_ocr, Linux→rapidocr,
+                                      composite for mixed Latin+Indic)
     match_mode               string   "contains" | "exact" | "regex"
                                       default: "contains"
     output_directory         string   Base output path
