@@ -20,3 +20,11 @@ rapidocr-onnxruntime>=1.3; sys_platform != "darwin"
 # ── Windows-only: native Windows.Media.Ocr (GPU-accelerated, ships w/ OS) ────
 # Requires Windows 10+ and the OS language pack for the language you OCR.
 winocr>=0.0.14; sys_platform == "win32"
+
+# ── Phase 3: FastAPI web UI (Bonus) ──────────────────────────────────────────
+fastapi>=0.110
+uvicorn[standard]>=0.29
+sse-starlette>=2.0
+python-multipart>=0.0.9
+aiosqlite>=0.20
+jinja2>=3.1
