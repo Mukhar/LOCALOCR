@@ -1,0 +1,32 @@
+{
+  "systeminfo": "AVX = 1 | AVX2 = 1 | fixture stub for tests only",
+  "model": {
+    "type": "base.en",
+    "multilingual": false,
+    "vocab": 51864,
+    "audio": {"ctx": 1500, "state": 512, "head": 8, "layer": 6}
+  },
+  "params": {
+    "model": "models/ggml-base.en.bin",
+    "language": "en",
+    "translate": false
+  },
+  "result": {"language": "en"},
+  "transcription": [
+    {
+      "timestamps": {"from": "00:00:00,000", "to": "00:00:03,240"},
+      "offsets": {"from": 0, "to": 3240},
+      "text": " Welcome back to Zee Business."
+    },
+    {
+      "timestamps": {"from": "00:00:03,240", "to": "00:00:08,500"},
+      "offsets": {"from": 3240, "to": 8500},
+      "text": " Our top pick today is Reliance Industries at target 2900."
+    },
+    {
+      "timestamps": {"from": "00:00:08,500", "to": "00:00:12,000"},
+      "offsets": {"from": 8500, "to": 12000},
+      "text": " Stop loss at 2750 for aggressive traders."
+    }
+  ]
+}

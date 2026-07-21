@@ -15,6 +15,7 @@ Public surface:
 """
 
 from .audio_extractor import AudioExtractionError, NoAudioStreamError, extract_audio
+from .correlator import correlate, enrich_ocr_results, frame_timestamp_seconds
 from .whisper_transcriber import (
     Segment,
     WhisperFailureError,
@@ -32,4 +33,8 @@ __all__ = [
     "Segment",
     "WhisperNotAvailableError",
     "WhisperFailureError",
+    # correlator
+    "correlate",
+    "enrich_ocr_results",
+    "frame_timestamp_seconds",
 ]
