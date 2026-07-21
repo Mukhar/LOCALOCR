@@ -143,6 +143,74 @@ def _run_ffmpeg(cmd: list, video_label: str, timeout: int) -> None:
         )
 
 
+# Sequence-number regex for the ffmpeg tmp filenames (frame_NNNN.png).
+# Kept module-level so _finalize_frames doesn't recompile on every call.
+_SEQ_RE = re.compile(r"frame_(\d+)\.png$")
+
+
+def _finalize_frames(
+    tmp_dir: Path,
+    out_path: Path,
+    timestamps: list[float],
+) -> list[dict]:
+    """
+    Rename ffmpeg's ``frame_NNNN.png`` tmp files into the final
+    ``frame_NNNN_XXmYYs.png`` naming contract and return per-frame dicts.
+
+    Parameters
+    ----------
+    tmp_dir : Path
+        Directory holding ffmpeg's numbered tmp frames. Iterated in sorted
+        order so ``timestamps[i]`` aligns with the i-th kept frame.
+    out_path : Path
+        Destination directory for the final renamed frames.
+    timestamps : list[float]
+        One timestamp per tmp frame (seconds from start of video). Must be
+        the same length as the sorted tmp-file list; short lists silently
+        cause an IndexError, which is a caller bug.
+
+    Notes
+    -----
+    * Frame numbering is derived from the ``NNNN`` capture in the tmp
+      filename via ``_SEQ_RE`` — NOT from the iteration index. This
+      preserves the current warn-and-skip semantics for out-of-band files
+      (a stray file logs a warning and is skipped without renumbering the
+      rest).
+    * Timestamp is rounded to the nearest integer second, matching the
+      pre-refactor formatting.
+    * Purely a naming/rename step. No config access, no ffmpeg calls.
+    """
+    finalized: list[dict] = []
+    for i, tmp_file in enumerate(sorted(tmp_dir.glob("frame_*.png"))):
+        m = _SEQ_RE.search(tmp_file.name)
+        if not m:
+            logger.warning("Ignoring unexpected file: %s", tmp_file.name)
+            continue
+
+        frame_number = int(m.group(1))
+        ts_seconds = int(round(timestamps[i]))
+        frame_name = f"frame_{frame_number:04d}_{_format_timestamp(ts_seconds)}.png"
+        final_path = out_path / frame_name
+
+        try:
+            tmp_file.rename(final_path)
+        except OSError as exc:
+            raise FrameExtractionError(
+                f"Failed to move frame file: {exc}"
+            ) from exc
+
+        finalized.append({
+            "frame_path": str(final_path),
+            "frame_name": frame_name,
+            "timestamp": _format_timestamp(ts_seconds),
+            "frame_number": frame_number,
+        })
+        logger.debug("Saved %s", frame_name)
+
+    finalized.sort(key=lambda e: e["frame_number"])
+    return finalized
+
+
 def extract_frames(
     video_path: str,
     output_dir: str,
@@ -213,43 +281,20 @@ def extract_frames(
             f"ffmpeg completed but wrote no frames for {str(video)!r}."
         )
 
-    logger.info("Renaming %d extracted frame(s)…", len(tmp_frames))
+    logger.info("Renaming %d extracted frame(s)\u2026", len(tmp_frames))
 
-    _seq_re = re.compile(r"frame_(\d+)\.png$")
-    extracted = []
-
-    for tmp_file in tmp_frames:
-        m = _seq_re.search(tmp_file.name)
-        if not m:
-            logger.warning("Ignoring unexpected file: %s", tmp_file.name)
-            continue
-
-        frame_number = int(m.group(1))
-        ts_str = _format_timestamp((frame_number - 1) * interval_seconds)
-        frame_name = f"frame_{frame_number:04d}_{ts_str}.png"
-        final_path = out_path / frame_name
-
-        try:
-            tmp_file.rename(final_path)
-        except OSError as exc:
-            raise FrameExtractionError(
-                f"Failed to move frame file: {exc}"
-            ) from exc
-
-        extracted.append({
-            "frame_path": str(final_path),
-            "frame_name": frame_name,
-            "timestamp": ts_str,
-            "frame_number": frame_number,
-        })
-        logger.debug("Saved %s", frame_name)
+    # Interval mode: the i-th kept frame corresponds to i * interval seconds
+    # from the start of the video. This matches the pre-refactor formula
+    # `(frame_number - 1) * interval_seconds` whenever tmp filenames are the
+    # canonical `frame_0001.png`, `frame_0002.png`, ... sequence ffmpeg
+    # produces via `-vf fps=1/N`.
+    timestamps = [i * interval_seconds for i in range(len(tmp_frames))]
+    extracted = _finalize_frames(tmp_dir, out_path, timestamps)
 
     try:
         tmp_dir.rmdir()
     except OSError:
         pass
-
-    extracted.sort(key=lambda e: e["frame_number"])
 
     logger.info("Extraction complete: %d frame(s) saved to %r", len(extracted), str(out_path))
     return extracted
