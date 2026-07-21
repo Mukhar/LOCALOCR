@@ -1,0 +1,18 @@
+{
+  "frames": {
+    "frame_0001_00m00s.png": {
+      "sha256": "305d2ebd9a84dac653b403704c666686b1306a32e9b7b9c234b5d5e21c198278",
+      "size": 17232
+    },
+    "frame_0002_00m02s.png": {
+      "sha256": "823850743bd96224785e906e3004377d16c8b09008bbe0a52c212105b54739ea",
+      "size": 16287
+    },
+    "frame_0003_00m04s.png": {
+      "sha256": "aa529d75593d8ae12067d6c75315dffb2abadc5b855c8404e6b619dbe9497bea",
+      "size": 19543
+    }
+  },
+  "interval_seconds": 2,
+  "video": "tests/fixtures/synthetic_baseline.mp4"
+}
