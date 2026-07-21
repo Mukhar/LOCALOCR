@@ -557,15 +557,70 @@ def _validate_extraction_config(cfg: dict) -> str:
     Resolve and validate ``cfg['extraction_mode']``, returning the
     normalized (lower-cased) mode name.
 
-    Fails fast per D6 when the mode is not a registered extractor. Mode-
-    specific parameter validation (scene threshold, hybrid gaps, …) lives
-    inside the individual strategy functions — plan 01-02 wires those up.
+    Fails fast per D6 when the mode is not a registered extractor. For
+    ``scene`` and ``hybrid`` modes, ``scene_config`` bounds are also
+    checked so ffmpeg is never launched with a nonsensical threshold
+    or a negative gap.
+
+    scene_config bounds:
+      - threshold        in [0.0, 1.0]        (scene + hybrid)
+      - min_gap_seconds  >= 0                 (scene + hybrid)
+      - max_gap_seconds  > 0                  (hybrid only)
     """
     mode = str(cfg.get("extraction_mode", "interval")).lower()
     if mode not in _EXTRACTORS:
         raise FrameExtractionError(
             f"extraction_mode {mode!r} invalid. Must be one of: {sorted(_EXTRACTORS)}"
         )
+
+    if mode in ("scene", "hybrid"):
+        scene_cfg = cfg.get("scene_config") or {}
+        if not isinstance(scene_cfg, dict):
+            raise FrameExtractionError(
+                f"scene_config must be a dict when extraction_mode={mode!r}, "
+                f"got {type(scene_cfg).__name__}"
+            )
+
+        if "threshold" in scene_cfg:
+            try:
+                threshold = float(scene_cfg["threshold"])
+            except (TypeError, ValueError) as exc:
+                raise FrameExtractionError(
+                    f"scene_config.threshold must be numeric, "
+                    f"got {scene_cfg['threshold']!r}"
+                ) from exc
+            if not 0.0 <= threshold <= 1.0:
+                raise FrameExtractionError(
+                    f"scene_config.threshold must be in [0.0, 1.0], "
+                    f"got {threshold!r}"
+                )
+
+        if "min_gap_seconds" in scene_cfg:
+            try:
+                min_gap = float(scene_cfg["min_gap_seconds"])
+            except (TypeError, ValueError) as exc:
+                raise FrameExtractionError(
+                    f"scene_config.min_gap_seconds must be numeric, "
+                    f"got {scene_cfg['min_gap_seconds']!r}"
+                ) from exc
+            if min_gap < 0:
+                raise FrameExtractionError(
+                    f"scene_config.min_gap_seconds must be >= 0, got {min_gap!r}"
+                )
+
+        if mode == "hybrid" and "max_gap_seconds" in scene_cfg:
+            try:
+                max_gap = float(scene_cfg["max_gap_seconds"])
+            except (TypeError, ValueError) as exc:
+                raise FrameExtractionError(
+                    f"scene_config.max_gap_seconds must be numeric, "
+                    f"got {scene_cfg['max_gap_seconds']!r}"
+                ) from exc
+            if max_gap <= 0:
+                raise FrameExtractionError(
+                    f"scene_config.max_gap_seconds must be > 0, got {max_gap!r}"
+                )
+
     return mode
 
 
